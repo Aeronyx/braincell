@@ -28,15 +28,17 @@ def entry(action, background=False, matcher=None):
 
 
 WANTED = [
+    ("SessionStart", entry("model", background=True)),             # which model: a new one gets a sparkle
     ("UserPromptSubmit", entry("busy")),                           # a turn starts
     ("PreToolUse", entry("tool", background=True)),                # which tool, and what for
     ("PostToolUse", entry("beat", background=True)),               # heartbeat after long tools
+    ("PreCompact", entry("tidy", background=True)),                # Claude is compacting its context
     ("Notification", entry("wait", matcher="permission_prompt")),  # Claude is asking for permission
     ("Notification", entry("wait", matcher="elicitation_dialog")),
     ("Stop", entry("idle")),                                       # the turn ended
-    ("StopFailure", entry("idle")),                                # the turn died on an API error
-    ("SessionEnd", entry("idle")),
-    ("Notification", entry("idle", matcher="idle_prompt")),        # backstop: Esc fires no Stop
+    ("StopFailure", entry("fail")),                                # the turn died on an API error
+    ("SessionEnd", entry("quit")),
+    ("Notification", entry("quit", matcher="idle_prompt")),        # backstop: Esc fires no Stop
 ]
 
 

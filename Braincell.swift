@@ -12,6 +12,7 @@ let idleGrace: TimeInterval = 20      // stay "busy" this long after a turn ends
 let reannounce: TimeInterval = 600    // repeat "busy" this often...
 let friendLease: TimeInterval = 1500  // ...and forget a friend's "busy" once it's this old
 let napFor: TimeInterval = 300        // whoever stops sleeps this long before the twins leave
+let longDay: TimeInterval = 4 * 3600  // after this much work in a day, a twin is worn out
 let detailEvery: TimeInterval = 60    // say what I'm doing at most this often...
 let detailBudget = 120                // ...and this many times a day (ntfy.sh allows 250 messages a day)
 let accent = NSColor(srgbRed: 0.91, green: 0.55, blue: 0.37, alpha: 1)
@@ -36,7 +37,7 @@ func after(_ seconds: TimeInterval, repeats: Bool = false, _ body: @escaping @Ma
 // MARK: - What a Claude is up to
 
 enum Doing: String {
-    case think, read, write, run, web, plan, team, wait
+    case think, read, write, run, web, plan, team, wait, tidy
 
     init(tool: String) {
         let t = tool.lowercased()
@@ -61,31 +62,37 @@ enum Doing: String {
         case .plan: return "planning"
         case .team: return "orchestrating agents"
         case .wait: return "waiting for an answer"
+        case .tidy: return "tidying its memory"
         }
     }
 
     var beat: Double {      // how long its gesture lasts
         switch self {
         case .think: return 1.8
-        case .read: return 2.2
-        case .write: return 1.5
-        case .run: return 1.3
-        case .web: return 2.0
-        case .plan: return 2.4
-        case .team: return 2.0
-        case .wait: return 1.6
+        case .read: return 2.4
+        case .write: return 1.8
+        case .run: return 1.8
+        case .web: return 2.4
+        case .plan: return 2.6
+        case .team: return 2.4
+        case .wait: return 2.2
+        case .tidy: return 1.6
         }
     }
 }
+
+/// weary: after a long day's work. fresh: on a Claude model it hasn't used before. spent: out of usage.
+enum Mood: String { case fine, weary, fresh, spent }
 
 struct Mind: Equatable {
     var busy = false
     var doing = Doing.think
     var label: String?      // a few words from Claude's own to-do list or command description
     var ticked = 0          // to-do items finished this turn
+    var mood = Mood.fine
 
     var words: String {
-        guard busy else { return "taking a break" }
+        guard busy else { return mood == .spent ? "out of usage" : "taking a break" }
         return (doing == .wait ? doing.phrase : label ?? doing.phrase) + "…"
     }
 }
@@ -129,6 +136,7 @@ struct Session {
         case "prompt": doing = .think; task = nil; purpose = nil; ticked = 0
         case "wait": doing = .wait
         case "done": if doing == .wait { doing = .think }
+        case "tidy": doing = .tidy
         default:
             guard line.hasPrefix("tool ") else { return }
             let json = String(line.dropFirst(5))
@@ -174,12 +182,13 @@ struct Session {
 // MARK: - The twins
 
 /// Draws the two peekers and their braincell. Coordinates are points, with y = 0 on the ledge they
-/// peek over; anything below it is out of sight. Movement comes in short bursts, and between
-/// them nothing is redrawn and no timer runs.
+/// peek over; anything below it is out of sight. They keep still most of the time: movement comes
+/// in short, smooth bursts, and between them nothing is redrawn and no timer runs.
 final class Twins: NSView {
     static let size = NSSize(width: 34, height: 18)
     static let ledgeBelowCenter: CGFloat = 8    // centered: how far under the menu bar's midline the ledge sits
     private static let doze: CGFloat = 3.4      // how far a sleeping head sinks
+    var showOff = false                         // the demo: rare moments come up often, and long waits are short
 
     private struct Twin { let x, width, top, eyeGap, eyeY, paw: CGFloat }
     private let twin = [
@@ -188,33 +197,43 @@ final class Twins: NSView {
     ]
 
     // Tweened poses. paws, up0, up1, cellUp: 0 = below the ledge, 1 = in place. sink: 1 = dozing low.
-    // lid: 1 = eyes shut. perch: 1 = the braincell rests on their paws. center: 1 = level with the
-    // other icons. zs: how visible the sleepers' z's are.
-    private var pose: [String: CGFloat] = ["paws": 0, "up0": 0, "up1": 0, "cellUp": 0, "sink0": 0, "sink1": 0,
-                                           "lid0": 0, "lid1": 0, "perch": 0, "center": 0, "zs": 1]
+    // lid: 1 = eyes shut. ko: 1 = eyes crossed out. perch: 1 = the braincell rests on their paws.
+    // center: 1 = level with the other icons. zs: how visible the wisps are.
+    private var pose: [String: CGFloat] = ["paws": 0, "up0": 0, "up1": 0, "cellUp": 0, "sink0": 0, "sink1": 0, "lid0": 0, "lid1": 0,
+                                           "ko0": 0, "ko1": 0, "perch": 0, "center": 0, "zs": 1]
     private enum Ease { case smooth, spring, windUp }    // spring overshoots at the end; windUp pulls back first
     private struct Tween { let start: CFTimeInterval, length: Double, from, to: CGFloat, ease: Ease, then: (() -> Void)? }
     private var tweens: [String: Tween] = [:]
 
     private var awake = [true, true]
     private var doing: [Doing] = [.think, .think]
+    private var mood: [Mood] = [.fine, .fine]
+    private var since: [CFTimeInterval] = [0, 0]    // when each started what it's doing now
+    private var woke: [CFTimeInterval] = [0, 0]     // when each last woke up
+    private var slept: [CFTimeInterval] = [0, 0]    // when each last dropped off
+    private var acted: [CFTimeInterval] = [0, 0]    // when each last acted out its work: it keeps still for a while after
 
     // The braincell. cellAt: 0 = over my twin, 1 = over my friend's, 0.5 = shared.
-    private struct Hop { let from, to: CGFloat, start: CFTimeInterval, length: Double, height, wobble: CGFloat, hard: Bool }
+    private struct Hop { var from, to: CGFloat, start: CFTimeInterval, length: Double, height: CGFloat, wobble: CGFloat = 0, caught = false, header = false }
     private var cellAt: CGFloat = 0
     private var hop: Hop?
     private var holder = 0      // who has it when nothing else decides: whoever switched tasks last
     private var lastHop: CFTimeInterval = 0
     private var nextPass: CFTimeInterval = 0
+    private var twinkle: CFTimeInterval = -60, nextTwinkle: CFTimeInterval = 0
 
     // A gesture is one short burst of movement by one twin.
-    private enum Move { case act(Doing), catchIt, bump, greet, cheer }
+    private enum Move { case act(Doing), catchIt, bump, greet, glad, toss, grab, five, yawn, stretch }
     private struct Gesture { let move: Move, start: CFTimeInterval, length: Double; var cut: CFTimeInterval? }
     private var gesture: [Gesture?] = [nil, nil]
     private var queued: [(move: Move, length: Double)?] = [nil, nil]
     private var settled: [CFTimeInterval] = [0, 0]      // a twin that just arrived or woke takes a moment before its next gesture
-    private var zs: [(x: CGFloat, y: CGFloat, side: CGFloat, start: CFTimeInterval)] = []
-    private var nextZ: [CFTimeInterval] = [0, 0]
+    private var owedFive = false
+
+    // Little things that drift away from a twin: a sleeper's z, a bead of sweat.
+    private struct Wisp { let sweat: Bool, x, y, side, size: CGFloat, start: CFTimeInterval }
+    private var wisps: [Wisp] = []
+    private var nextWisp: [CFTimeInterval] = [0, 0]
 
     private var frames: Timer?
     private var life: Timer?
@@ -222,6 +241,12 @@ final class Twins: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }   // clicks belong to the status item
     override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
+
+    private var now: CFTimeInterval { CACurrentMediaTime() }
+    private var rest: Double { showOff ? 3 : 30 }       // how long a twin keeps still after acting out its work
+    private func long(_ seconds: Double) -> Double { showOff ? seconds / 40 : seconds }
+    private func rarely(_ oneIn: Int) -> Bool { Int.random(in: 0..<(showOff ? 2 : oneIn)) == 0 }
+    private func free(_ who: Int) -> Bool { awake[who] && gesture[who] == nil && now >= settled[who] }
 
     // MARK: Poses
 
@@ -233,13 +258,13 @@ final class Twins: NSView {
     func arrive() {
         let center = tweens["center"]
         tweens.removeAll(); tweens["center"] = center
-        hop = nil; gesture = [nil, nil]; queued = [nil, nil]; zs = []
+        hop = nil; gesture = [nil, nil]; queued = [nil, nil]; wisps = []; owedFive = false
         pose["zs"] = 1
-        settled = [CACurrentMediaTime() + 1.2, CACurrentMediaTime() + 1.2]
+        settled = [now + 1.2, now + 1.2]; woke = [now, now]; since = [now, now]; acted = [0, 0]
         awake = [true, true]
         for who in 0..<2 {
-            if pose["up\(who)"]! == 0 { pose["sink\(who)"] = 0; pose["lid\(who)"] = 0 }
-            else { move("lid\(who)", to: 0, over: 0.25); move("sink\(who)", to: 0, over: 0.5, .spring) }   // caught mid-exit
+            if pose["up\(who)"]! == 0 { pose["sink\(who)"] = 0; pose["ko\(who)"] = 0; pose["lid\(who)"] = droop(who) }
+            else { wakeUp(who) }   // caught mid-exit
         }
         if pose["cellUp"]! == 0 {      // only pick a new spot for the braincell while nobody can see it
             holder = Bool.random() ? 0 : 1
@@ -251,9 +276,9 @@ final class Twins: NSView {
         move("up\(first)", to: 1, over: 0.45, .spring, delay: 0.27)
         move("up\(1 - first)", to: 1, over: 0.45, .spring, delay: 0.42)
         move("cellUp", to: 1, over: 0.4, .spring, delay: 0.82) { [weak self] in
-            self?.start(.bump, on: 0, for: 0.45); self?.start(.bump, on: 1, for: 0.45)
+            self?.start(.bump, on: 0, for: 0.6); self?.start(.bump, on: 1, for: 0.6)
         }
-        nextPass = CACurrentMediaTime() + .random(in: 8...20)
+        nextPass = now + .random(in: 30...60)
         scheduleLife()
     }
 
@@ -261,7 +286,6 @@ final class Twins: NSView {
     func leave(then done: @escaping () -> Void) {
         life?.invalidate(); life = nil
         calm(0); calm(1)
-        if let h = hop { cellAt = h.to; hop = nil }
         move("zs", to: 0, over: 0.3)
         move("cellUp", to: 0, over: 0.35)
         move("up0", to: 0, over: 0.45, .windUp, delay: 0.25)
@@ -272,89 +296,165 @@ final class Twins: NSView {
     func setAwake(_ who: Int, _ on: Bool) {
         guard awake[who] != on else { return }
         awake[who] = on
-        let lid = "lid\(who)", sink = "sink\(who)"
+        let other = 1 - who
         if on {
-            settled[who] = CACurrentMediaTime() + 0.9
-            move(lid, to: 0, over: 0.25)
-            move(sink, to: 0, over: 0.5, .spring)
-            if life != nil, awake[1 - who] { interrupt(1 - who, with: .greet, for: 0.9) }
+            settled[who] = now + 0.9; woke[who] = now
+            wakeUp(who)
+            if now - slept[who] > long(120) { start(.yawn, on: who, for: 1.9) }             // a long nap ends with a yawn
+            if life != nil, awake[other] { interrupt(other, with: .greet, for: 1.1) }
+            placeCell()
         } else {
+            let lag = gesture[who] == nil ? 0 : 0.27    // a gesture under way eases out first
+            slept[who] = now
             calm(who)
-            move(lid, to: 0.8, over: 0.45)                              // nods off...
-            move(sink, to: 0.5, over: 0.5) { [weak self] in
-                self?.move(lid, to: 0.35, over: 0.15)                   // ...catches itself...
-                self?.move(sink, to: 0.1, over: 0.25, .spring) { [weak self] in
-                    self?.move(lid, to: 1, over: 0.45)                  // ...and is gone
-                    self?.move(sink, to: 1, over: 0.8) { [weak self] in self?.snooze(who) }
+            var wait = 0.0, toss: Double?               // what it does before dropping off, and how long that takes
+            if now >= settled[who], mood[who] != .spent {
+                if now - woke[who] > long(600) {                                            // a long stint ends with a stretch
+                    start(.stretch, on: who, for: 1.7); wait = lag + 1.7
+                } else if cellAt == CGFloat(who), hop == nil, awake[other] {                // or it flicks the braincell over first
+                    start(.toss, on: who, for: 0.55); wait = lag + 0.5; toss = lag + 0.2
                 }
             }
+            dropOff(who, after: wait)
+            placeCell(tossedAfter: toss)
         }
-        placeCell()     // the one still thinking gets the braincell
+    }
+
+    private func wakeUp(_ who: Int) {
+        if pose["ko\(who)"]! > 0 { move("ko\(who)", to: 0, over: 0.25) }
+        move("lid\(who)", to: droop(who), over: 0.25)
+        move("sink\(who)", to: 0, over: 0.5, .spring)
+    }
+
+    /// Its Claude has stopped: it nods off. Out of usage, it slumps with its eyes crossed out instead.
+    private func dropOff(_ who: Int, after wait: Double) {
+        let lid = "lid\(who)", sink = "sink\(who)", spent = mood[who] == .spent
+        move("ko\(who)", to: spent ? 1 : 0, over: 0.3, delay: wait)
+        if spent || pose[sink]! > 0.6 {
+            move(lid, to: 1, over: 0.3, delay: wait)
+            move(sink, to: spent ? 0.75 : 1, over: 0.7, delay: wait) { [weak self] in self?.puff(who) }
+            return
+        }
+        move(lid, to: 0.8, over: 0.45, delay: wait)                     // nods off...
+        move(sink, to: 0.5, over: 0.5, delay: wait) { [weak self] in
+            self?.move(lid, to: 0.35, over: 0.15)                       // ...catches itself...
+            self?.move(sink, to: 0.1, over: 0.25, .spring) { [weak self] in
+                self?.move(lid, to: 1, over: 0.45)                      // ...and is gone
+                self?.move(sink, to: 1, over: 0.8) { [weak self] in self?.puff(who) }
+            }
+        }
     }
 
     func setDoing(_ who: Int, _ what: Doing) {
         guard doing[who] != what else { return }
-        doing[who] = what
+        doing[who] = what; since[who] = now
         holder = who
         guard life != nil, awake[who] else { return }
-        start(.act(what), on: who, for: what.beat)
+        relax(who)
+        if what == .wait || what == .tidy { interrupt(who, with: .act(what), for: what.beat) }      // worth showing right away
+        else if gesture[who] == nil, now - acted[who] > rest { start(.act(what), on: who, for: what.beat) }
         placeCell()
     }
 
-    func cheer(_ who: Int) {
-        if life != nil, awake[who] { interrupt(who, with: .cheer, for: 1.0) }
+    func setMood(_ who: Int, _ feels: Mood) {
+        guard mood[who] != feels else { return }
+        let wasSpent = mood[who] == .spent
+        mood[who] = feels
+        if awake[who] { relax(who) } else if wasSpent != (feels == .spent) { dropOff(who, after: 0) }
+        if feels == .fresh, life != nil { holder = who; nextTwinkle = 0; placeCell(); sparkle() }   // it gets to show off the braincell
+    }
+
+    /// A to-do item is done.
+    func tick(_ who: Int) {
+        if life != nil, awake[who] { interrupt(who, with: .glad, for: 1.4) }
+    }
+
+    /// Another hour of working together.
+    func highFive() {
+        guard life != nil else { return }
+        if free(0), free(1) { for who in 0..<2 { start(.five, on: who, for: 1.3) } } else { owedFive = true }
     }
 
     // MARK: A little life
 
     private func scheduleLife() {
         life?.invalidate()
-        life = after(.random(in: 2.5...5.5)) { [weak self] in self?.liveALittle() }
+        life = after(showOff ? .random(in: 2.5...4.5) : .random(in: 6...10)) { [weak self] in self?.liveALittle() }
     }
 
     private func liveALittle() {
         let up = [0, 1].filter { awake[$0] }
-        let inStep = up.count == 2 && doing[0] == doing[1] && doing[0] != .think
-        if inStep, gesture[0] == nil, gesture[1] == nil, Bool.random() {
-            for who in up { start(.act(doing[who]), on: who, for: doing[who].beat) }   // same work: they move as one
-        } else if !inStep {
-            for who in up where gesture[who] == nil && Bool.random() { start(.act(doing[who]), on: who, for: doing[who].beat) }
+        let rested = up.filter { free($0) && now - acted[$0] > rest }
+        if owedFive, free(0), free(1) {
+            owedFive = false
+            highFive()
+        } else if rested.count == 2, doing[0] == doing[1], doing[0] != .think, rarely(3) {
+            for who in up { start(.act(doing[who]), on: who, for: doing[who].beat) }       // same work: they move as one
+        } else if let who = rested.randomElement(), Bool.random() {
+            let sleepy = mood[who] == .weary ? rarely(3) : Calendar.current.component(.hour, from: Date()) < 5 && rarely(6)
+            if sleepy { start(.yawn, on: who, for: 1.9) } else { start(.act(doing[who]), on: who, for: doing[who].beat) }
         }
-        if let who = up.randomElement(), gesture[who] == nil { blink(who) }
-        for who in 0..<2 where !awake[who] && pose["sink\(who)"]! == 1 && CACurrentMediaTime() > nextZ[who] { snooze(who) }
-        if up.count == 2, CACurrentMediaTime() > nextPass {
+        if let who = up.randomElement(), gesture[who] == nil, tweens["lid\(who)"] == nil { blink(who) }
+        for who in up { relax(who) }
+        for who in 0..<2 where !awake[who] && tweens["sink\(who)"] == nil && now > nextWisp[who] { puff(who) }
+        sparkle()
+        if up.count == 2, now > nextPass {
             holder = 1 - holder
-            nextPass = CACurrentMediaTime() + .random(in: 18...40)
+            nextPass = now + .random(in: 40...90)
         }
         placeCell()
         scheduleLife()
     }
 
-    /// A little z drifts up and away from a sleeper.
-    private func snooze(_ who: Int) {
-        let side: CGFloat = who == 0 ? -1 : 1
-        zs.append((twin[who].x + side * 4.2, twin[who].top - Twins.doze + 1.8, side, CACurrentMediaTime()))
-        nextZ[who] = CACurrentMediaTime() + .random(in: 5...9)
+    /// On a Claude model it hasn't used before, a twin's braincell sparkles when it comes to rest, and now and then after.
+    private func sparkle() {
+        guard hop == nil, now > nextTwinkle, let who = [0, 1].first(where: { awake[$0] && mood[$0] == .fresh && cellAt == CGFloat($0) }) else { return }
+        twinkle = now; nextTwinkle = now + long(.random(in: 60...120))
+        if free(who) { start(.glad, on: who, for: 1.4) }
+        run()
+    }
+
+    /// How far shut a twin's eyes rest: tired after a long day, or bored of waiting.
+    private func droop(_ who: Int) -> CGFloat {
+        if mood[who] == .weary { return 0.4 }
+        return doing[who] == .wait && now - since[who] > long(60) ? 0.45 : 0
+    }
+
+    private func relax(_ who: Int) {
+        let lid = "lid\(who)"
+        if awake[who], tweens[lid] == nil, pose[lid]! != droop(who) { move(lid, to: droop(who), over: 0.6) }
+    }
+
+    /// A z drifts up from a sleeper (a big one after a long day). A twin that's out of usage sweats instead.
+    private func puff(_ who: Int) {
+        let side: CGFloat = who == 0 ? -1 : 1, t = twin[who]
+        if mood[who] == .spent {
+            wisps.append(Wisp(sweat: true, x: t.x + side * (t.width / 2 + 1.5), y: t.top - Twins.doze * 0.75 - 0.3, side: side, size: 1, start: now))
+        } else {
+            let size: CGFloat = mood[who] == .weary ? 1.5 : 1
+            wisps.append(Wisp(sweat: false, x: t.x + side * (2.6 + 1.6 * size), y: t.top - Twins.doze + 1.8, side: side, size: size, start: now))
+        }
+        nextWisp[who] = now + .random(in: 5...9)
         run()
     }
 
     private func blink(_ who: Int) {
         move("lid\(who)", to: 1, over: 0.07) { [weak self] in
             guard let self, self.awake[who] else { return }
-            self.move("lid\(who)", to: 0, over: 0.11)
+            self.move("lid\(who)", to: self.droop(who), over: 0.11)
         }
     }
 
     private func start(_ move: Move, on who: Int, for length: Double) {
         if gesture[who] != nil { queued[who] = (move, length); return }    // never cut a movement short: it waits its turn
-        gesture[who] = Gesture(move: move, start: max(CACurrentMediaTime(), settled[who]), length: length, cut: nil)
+        gesture[who] = Gesture(move: move, start: max(now, settled[who]), length: length, cut: nil)
         run()
     }
 
     /// Eases a twin out of whatever it's doing, rather than snapping it back to rest.
     private func calm(_ who: Int) {
         queued[who] = nil
-        if gesture[who] != nil, gesture[who]!.cut == nil { gesture[who]!.cut = CACurrentMediaTime() }
+        if gesture[who] != nil, gesture[who]!.cut == nil { gesture[who]!.cut = now }
     }
 
     private func interrupt(_ who: Int, with move: Move, for length: Double) {
@@ -364,34 +464,48 @@ final class Twins: NSView {
 
     // MARK: The braincell
 
-    private func cellSpot() -> (at: CGFloat, perched: Bool) {
-        if awake[0] != awake[1] { return (awake[0] ? 0 : 1, false) }        // whoever is still thinking keeps it
-        if !awake[0] { return (cellAt, false) }                             // both dozing: leave it be
+    private func cellSpot() -> (at: CGFloat, perched: Bool, urgent: Bool) {
+        if awake[0] != awake[1] { return (awake[0] ? 0 : 1, false, true) }          // whoever is still thinking keeps it
+        if !awake[0] { return (cellAt, false, false) }                              // both dozing: leave it be
         let (a, b) = (doing[0], doing[1])
-        if a == .wait && b == .wait { return (0.5, true) }                  // nobody's using it: it's set down on their paws
-        if a == .wait || b == .wait { return (a == .wait ? 1 : 0, false) }  // the one who isn't stuck gets it
-        if a == b && a != .think { return (0.5, false) }                    // same work: they share it
-        return (CGFloat(holder), false)
+        if a == .wait && b == .wait { return (0.5, true, true) }                    // nobody's using it: it's set down on their paws
+        if a == .wait || b == .wait { return (a == .wait ? 1 : 0, false, true) }    // the one who isn't stuck gets it
+        if a == b && a != .think { return (0.5, false, false) }                     // same work: they share it
+        return (CGFloat(holder), false, false)
     }
 
-    /// Sends the braincell where it belongs. How it travels depends on what they're up to.
-    private func placeCell() {
-        let now = CACurrentMediaTime(), spot = cellSpot()
+    /// Sends the braincell where it belongs, once it has sat still for a while. How it travels
+    /// depends on what they're up to.
+    private func placeCell(tossedAfter toss: Double? = nil) {
+        let spot = cellSpot()
         if (pose["perch"]! > 0.5) != spot.perched { move("perch", to: spot.perched ? 1 : 0, over: 0.7) }
-        guard hop == nil, tweens["cellUp"] == nil, spot.at != cellAt, now - lastHop > 2.5 else { return }   // the life timer tries again
+        guard hop == nil, tweens["cellUp"] == nil, spot.at != cellAt, now - lastHop > (spot.urgent ? 1 : showOff ? 3 : 20) else { return }
         let pair = [doing[0], doing[1]]
-        var style = (length: 0.8, height: CGFloat(1.8), wobble: CGFloat(0), hard: false)        // an easy lob
-        if pair.contains(.run) || pair.contains(.write) { style = (0.38, 0.7, 0, true) }       // busy hands: a quick flat toss
-        else if pair.contains(.web) { style = (1.1, 1.4, 0.9, false) }                         // surfing: it weaves across
-        else if pair.contains(.plan) || pair.contains(.team) { style = (1.3, 3.0, 0, false) }  // big ideas: a high, slow lob
-        hop = Hop(from: cellAt, to: spot.at, start: now, length: style.length, height: style.height, wobble: style.wobble, hard: style.hard)
+        let giver = [0, 1].first { CGFloat($0) == cellAt }, taker = [0, 1].first { CGFloat($0) == spot.at }
+        var next = Hop(from: cellAt, to: spot.at, start: now, length: 0.9, height: 1.8)                 // an easy lob
+        if let toss {                                                                                    // flicked over on the way to sleep
+            next.start = now + toss; next.length = 0.7; next.height = 2.2; next.caught = true
+        } else if let giver, let taker, !spot.urgent, awake[giver], free(taker), rarely(6) {             // now and then the other one just takes it
+            gesture[taker] = Gesture(move: .grab, start: now, length: 1.7, cut: nil)
+            next.start = now + 0.36 * 1.7; next.length = 0.34 * 1.7; next.height = 1.0
+        } else if pair.contains(.web) {                                                                  // surfing: it weaves across
+            next.length = 1.1; next.height = 1.4; next.wobble = 0.9
+        } else if pair.contains(.plan) || pair.contains(.team) {                                         // big ideas: a high, slow lob
+            next.length = 1.3; next.height = 3.0
+        } else if let giver, taker != nil, free(giver), pair.contains(.run) || pair.contains(.write) {   // busy hands: a flick and a catch
+            start(.toss, on: giver, for: 0.55)
+            next.start = now + 0.2; next.length = 0.6; next.height = 0.9; next.caught = true
+        } else {
+            next.header = taker != nil && rarely(8)                                                      // or it lands on a head and pops back up
+        }
+        hop = next
         run()
     }
 
     // MARK: Tweening (a 60 fps timer that exists only while something is moving)
 
     private func move(_ key: String, to: CGFloat, over length: Double, _ ease: Ease = .smooth, delay: Double = 0, then: (() -> Void)? = nil) {
-        tweens[key] = Tween(start: CACurrentMediaTime() + delay, length: length, from: pose[key]!, to: to, ease: ease, then: then)
+        tweens[key] = Tween(start: now + delay, length: length, from: pose[key]!, to: to, ease: ease, then: then)
         run()
     }
 
@@ -400,7 +514,7 @@ final class Twins: NSView {
     }
 
     private func step() {
-        let now = CACurrentMediaTime()
+        let now = self.now
         for (key, t) in tweens where tweens[key]?.start == t.start {     // skips any replaced earlier in this pass
             let p = max(0, min(1, (now - t.start) / t.length))
             let eased: Double
@@ -414,15 +528,22 @@ final class Twins: NSView {
         }
         if let h = hop, now - h.start >= h.length {
             cellAt = h.to; hop = nil; lastHop = now
-            if h.hard, h.to != 0.5, awake[Int(h.to)], gesture[Int(h.to)] == nil { start(.catchIt, on: Int(h.to), for: 0.3) }
+            if let who = [0, 1].first(where: { CGFloat($0) == h.to }), h.caught || h.header, awake[who], gesture[who] == nil {
+                start(.catchIt, on: who, for: 0.4)
+                if h.header { hop = Hop(from: h.to, to: h.to, start: now, length: 0.4, height: -1.2) }      // down onto the head, and back up
+            }
+            sparkle()
         }
         for who in 0..<2 {
             guard let g = gesture[who], now - g.start >= g.length || g.cut.map({ now - $0 >= 0.25 }) == true else { continue }
+            if case .act = g.move { acted[who] = now }
             gesture[who] = nil
             if let next = queued[who] { queued[who] = nil; start(next.move, on: who, for: next.length) }
         }
-        zs.removeAll { now - $0.start >= 2.4 }
-        if tweens.isEmpty && hop == nil && gesture[0] == nil && gesture[1] == nil && zs.isEmpty { frames?.invalidate(); frames = nil }
+        wisps.removeAll { now - $0.start >= 2.4 }
+        if tweens.isEmpty && hop == nil && gesture[0] == nil && gesture[1] == nil && wisps.isEmpty && now - twinkle > 1.4 {
+            frames?.invalidate(); frames = nil
+        }
         needsDisplay = true
     }
 
@@ -431,6 +552,8 @@ final class Twins: NSView {
     private struct Limbs {
         var gazeX: CGFloat = 0, gazeY: CGFloat = 0, head: CGFloat = 0, tilt: CGFloat = 0
         var pawX: (CGFloat, CGFloat) = (0, 0), pawY: (CGFloat, CGFloat) = (0, 0)
+        var squint: CGFloat = 0, smile: CGFloat = 0, mouth: CGFloat = 0, squash: CGFloat = 0
+        var reach: (x: CGFloat, y: CGFloat) = (0, 0)    // how far its inner paw has gone toward the braincell
     }
 
     private func limbs(_ who: Int, at now: CFTimeInterval) -> Limbs {
@@ -438,37 +561,54 @@ final class Twins: NSView {
         guard let g = gesture[who] else { return l }
         let p = CGFloat(min(1, max(0, (now - g.start) / g.length)))
         let fade = CGFloat(g.cut.map { max(0, 1 - (now - $0) / 0.25) } ?? 1)   // easing out early, if it was asked to stop
-        let ramp = min(1, p * 4, (1 - p) * 4)
-        let ease = ramp * ramp * (3 - 2 * ramp) * fade                       // glide in and out of the gesture
+        func smooth(_ x: CGFloat) -> CGFloat { let c = max(0, min(1, x)); return c * c * (3 - 2 * c) }
+        let ease = smooth(min(p, 1 - p) * 4) * fade                             // glides in, holds, glides out
+        let bell = pow(sin(.pi * p), 2) * fade                                  // one smooth rise and fall
+        let toward: CGFloat = who == 0 ? 1 : -1                                 // which way the other twin is
         func wave(_ cycles: CGFloat) -> CGFloat { sin(p * cycles * 2 * .pi) }
+        func inner(_ v: CGFloat) -> (CGFloat, CGFloat) { who == 0 ? (0, v) : (v, 0) }
         switch g.move {
         case .act(.think):      // gazes up, pondering
             l.gazeY = 0.45 * ease
-        case .act(.read):       // eyes travel along three lines, gliding back to the start of each
-            let line = (p * 3).truncatingRemainder(dividingBy: 1)
-            let along = line < 0.8 ? line / 0.8 : 1 - (line - 0.8) / 0.2
-            l.gazeX = (2 * along * along * (3 - 2 * along) - 1) * 0.85 * ease; l.gazeY = -0.35 * ease
-        case .act(.write):      // paws type
-            l.pawY = (max(0, wave(6)) * 1.1 * ease, max(0, -wave(6)) * 1.1 * ease); l.gazeY = -0.4 * ease
-        case .act(.run):        // three little hops
-            l.head = abs(wave(1.5)) * ease
-        case .act(.web):        // looks all around
-            l.gazeX = wave(2) * 0.9 * ease; l.gazeY = cos(p * 2 * .pi) * 0.4 * ease
+        case .act(.read):       // eyes travel along two lines, gliding back to the start of the second
+            let line = (p * 2).truncatingRemainder(dividingBy: 1)
+            l.gazeX = (2 * smooth(line < 0.8 ? line / 0.8 : 1 - (line - 0.8) / 0.2) - 1) * 0.85 * ease; l.gazeY = -0.35 * ease
+        case .act(.write):      // four soft taps, one paw and then the other
+            let beat = p * 4, tap = pow(sin(.pi * beat.truncatingRemainder(dividingBy: 1)), 2) * 0.9 * ease
+            l.pawY = Int(beat) % 2 == 0 ? (tap, 0) : (0, tap); l.gazeY = -0.4 * ease
+        case .act(.run):        // leans in and narrows its eyes at the output
+            l.squint = 0.5 * ease; l.gazeY = -0.3 * ease; l.head = -0.3 * ease
+        case .act(.web):        // looks all around, once
+            l.gazeX = wave(1) * 0.9 * ease; l.gazeY = cos(p * 2 * .pi) * 0.4 * ease
         case .act(.plan):       // tilts its head one way, then the other
-            l.tilt = wave(1) * 8 * ease; l.gazeY = 0.4 * ease
+            l.tilt = wave(1) * 6 * ease; l.gazeY = 0.4 * ease
         case .act(.team):       // conducts with both paws
-            l.pawY = (2.6 * ease, 2.6 * ease); l.pawX = (wave(2) * 0.9 * ease, -wave(2) * 0.9 * ease)
+            l.pawY = (2.2 * ease, 2.2 * ease); l.pawX = (wave(1) * 0.7 * ease, -wave(1) * 0.7 * ease)
         case .act(.wait):       // leans out and waves at whoever it's waiting for
-            l.tilt = (who == 0 ? 5 : -5) * ease; l.gazeY = -0.3 * ease
-            if who == 0 { l.pawY.0 = 2.8 * ease; l.pawX.0 = wave(3) * 0.8 * ease } else { l.pawY.1 = 2.8 * ease; l.pawX.1 = wave(3) * 0.8 * ease }
+            l.tilt = 5 * toward * ease; l.gazeY = -0.3 * ease
+            if who == 0 { l.pawY.0 = 2.8 * ease; l.pawX.0 = wave(2) * 0.7 * ease } else { l.pawY.1 = 2.8 * ease; l.pawX.1 = wave(2) * 0.7 * ease }
+        case .act(.tidy):       // squeezes itself down, the way its Claude is squeezing its memory
+            l.squash = bell; l.squint = 0.6 * bell
         case .catchIt:          // dips as the braincell lands
-            l.head = -0.8 * sin(.pi * p) * fade
+            l.head = -0.6 * bell
         case .bump:             // the paws they hold bump once
-            if who == 0 { l.pawY.1 = 1.6 * sin(.pi * p) * fade } else { l.pawY.0 = 1.6 * sin(.pi * p) * fade }
-        case .greet:            // the other one just woke up: a glance over and a little hop
-            l.gazeX = (who == 0 ? 0.9 : -0.9) * ease; l.head = 0.9 * sin(.pi * min(1, p * 2)) * fade
-        case .cheer:            // a to-do item is done: paws up, two hops
-            l.pawY = (2.8 * ease, 2.8 * ease); l.head = 1.1 * abs(wave(1)) * ease; l.gazeY = 0.35 * ease
+            l.pawY = inner(1.3 * bell)
+        case .greet:            // the other one just woke up: a glance over, and it sits up a little
+            l.gazeX = 0.9 * toward * ease; l.head = 0.6 * bell
+        case .glad:             // a to-do item is done: its eyes smile
+            l.smile = ease; l.head = 0.5 * bell
+        case .toss:             // flicks the braincell over
+            l.pawY = inner(2.2 * bell); l.pawX = inner(0.9 * toward * bell)
+        case .grab:             // reaches up and over, takes the braincell from above the other's head, and brings it home
+            l.reach = p < 0.5 ? (smooth((p - 0.08) / 0.24) * fade, smooth(p / 0.24) * fade)
+                              : ((1 - smooth((p - 0.72) / 0.2)) * fade, (1 - smooth((p - 0.78) / 0.22)) * fade)
+        case .five:             // a high five
+            l.pawY = inner(4.2 * bell); l.pawX = inner(0.4 * toward * bell); l.gazeX = 0.8 * toward * ease; l.smile = bell
+        case .yawn:             // a big yawn
+            let wide = smooth(min(p, 1 - p) * 3.5) * fade
+            l.mouth = wide; l.squint = wide; l.head = 0.5 * wide
+        case .stretch:          // a long stint is over: it stretches
+            l.pawY = (3.2 * ease, 3.2 * ease); l.pawX = (-0.9 * ease, 0.9 * ease); l.head = 0.7 * ease; l.smile = ease
         }
         return l
     }
@@ -482,14 +622,16 @@ final class Twins: NSView {
         shift.translateX(by: 0, yBy: (bounds.midY - Twins.ledgeBelowCenter) * pose["center"]!)
         shift.concat()
         NSBezierPath(rect: NSRect(x: bounds.minX, y: 0, width: bounds.width, height: bounds.height)).addClip()
-        paint(dark: dark, originX: (bounds.width - Twins.size.width) / 2, at: CACurrentMediaTime())
+        paint(dark: dark, originX: (bounds.width - Twins.size.width) / 2, at: now)
     }
 
     private func paint(dark: Bool, originX ox: CGFloat, at now: CFTimeInterval) {
+        guard let cg = NSGraphicsContext.current?.cgContext else { return }
         let ink = dark ? NSColor(white: 1, alpha: 0.92) : NSColor(white: 0, alpha: 0.85)
         let perch = pose["perch"]!, cellUp = pose["cellUp"]!
         let pawLift = (pose["paws"]! - 1) * 4
-        func drop(_ i: Int, _ l: Limbs) -> CGFloat { (pose["up\(i)"]! - 1) * (twin[i].top + 2.5) - pose["sink\(i)"]! * Twins.doze + l.head }
+        let limb = [limbs(0, at: now), limbs(1, at: now)]
+        func drop(_ i: Int) -> CGFloat { (pose["up\(i)"]! - 1) * (twin[i].top + 2.5) - pose["sink\(i)"]! * Twins.doze + limb[i].head }
         func oval(_ cx: CGFloat, _ cy: CGFloat, _ rx: CGFloat, _ ry: CGFloat) -> NSRect {
             NSRect(x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2)
         }
@@ -500,28 +642,16 @@ final class Twins: NSView {
             cell = h.from + (h.to - h.from) * (u * u * (3 - 2 * u))
             arc = sin(.pi * u) * (h.height + sin(.pi * u * 4) * h.wobble)
         }
-        let limb = [limbs(0, at: now), limbs(1, at: now)]
-
         // While the braincell is coming or going it passes behind the heads, as if popping out of one.
-        func rest(_ i: Int) -> CGFloat { twin[i].top + drop(i, limb[i]) + 3.1 }
-        let aloft = rest(0) + (rest(1) - rest(0)) * cell + arc
+        func float(_ i: Int) -> CGFloat { twin[i].top + drop(i) + 3.1 }
+        let aloft = float(0) + (float(1) - float(0)) * cell + arc
         let cellSpot = oval(ox + twin[0].x + (twin[1].x - twin[0].x) * cell, -3 + (aloft + (3.6 - aloft) * perch + 3) * cellUp, 1.9, 1.9)
         if cellUp < 1 { accent.setFill(); NSBezierPath(ovalIn: cellSpot).fill() }
 
-        ink.setFill()
         for (i, t) in twin.enumerated() {
-            let l = limb[i]
-            let cx = ox + t.x, half = t.width / 2
-            let down = drop(i, l)
-
-            // The ledge cuts the paws into flat-bottomed mitts.
-            let paws: [(CGFloat, CGFloat, CGFloat)] = [(-1, l.pawX.0, l.pawY.0), (1, l.pawX.1, l.pawY.1)]
-            for (side, dx, dy) in paws { NSBezierPath(ovalIn: oval(cx + side * t.paw + dx, pawLift + 0.7 + dy, 1.6, 1.35)).fill() }
-
-            // Mine is solid with the eyes punched out. My friend's is an outline with solid eyes.
-            let hollow = i == 1
+            let l = limb[i], cx = ox + t.x, down = drop(i), hollow = i == 1
             let edge: CGFloat = hollow ? 0.55 : 0          // keeps the outline inside the same silhouette
-            let wide = half - edge, top = t.top + down - edge, shoulder = top - wide * 0.95
+            let wide = t.width / 2 - edge, top = t.top + down - edge, shoulder = top - wide * 0.95
             let head = NSBezierPath()
             head.move(to: NSPoint(x: cx - wide, y: -12))
             head.line(to: NSPoint(x: cx - wide, y: shoulder))
@@ -535,48 +665,93 @@ final class Twins: NSView {
             head.close()
 
             // Eyes drift toward the braincell: the holder glances up, the other looks across.
-            let holds = i == 0 ? 1 - cell : cell, watching = max(0, min(1, cellUp))
+            let holds = i == 0 ? 1 - cell : cell, watching = max(0, min(1, cellUp)), ko = pose["ko\(i)"]!
             let reach: CGFloat = hollow ? 0.55 : 1.2
             let gazeX = max(-reach, min(reach, (i == 0 ? 0.55 : -0.55) * (1 - holds) * watching + l.gazeX))
-            let gazeY = (0.35 * holds * (1 - perch) - 0.45 * perch) * watching + l.gazeY
-            let open = 1.2 * (1 - 0.75 * pose["lid\(i)"]!)
-            let eyes = NSBezierPath()
-            for side: CGFloat in [-1, 1] { eyes.appendOval(in: oval(cx + side * t.eyeGap + gazeX, t.eyeY + down + gazeY, 1.0, open)) }
-            if l.tilt != 0 {
-                var turn = AffineTransform(translationByX: cx, byY: 0)
-                turn.rotate(byDegrees: l.tilt)
-                turn.translate(x: -cx, y: 0)
-                head.transform(using: turn); eyes.transform(using: turn)
+            let gazeY = (0.35 * holds * (1 - perch) - 0.45 * perch) * watching + l.gazeY + 0.25 * l.smile
+            let open = 1.2 * (1 - 0.75 * pose["lid\(i)"]!) * (1 - 0.75 * l.squint) * (1 - ko)
+            let face = NSBezierPath(), crosses = NSBezierPath()
+            for side: CGFloat in [-1, 1] {
+                let x = cx + side * t.eyeGap + gazeX * (1 - ko), y = t.eyeY + down + gazeY * (1 - ko)
+                let k = open * 4 / 3, low = k * (1.55 * l.smile - 1)       // the lower lid curves down (an oval) or, smiling, up
+                face.move(to: NSPoint(x: x - 1, y: y))
+                face.curve(to: NSPoint(x: x + 1, y: y), controlPoint1: NSPoint(x: x - 1, y: y + k), controlPoint2: NSPoint(x: x + 1, y: y + k))
+                face.curve(to: NSPoint(x: x - 1, y: y), controlPoint1: NSPoint(x: x + 1, y: y + low), controlPoint2: NSPoint(x: x - 1, y: y + low))
+                face.close()
+                for slant: CGFloat in [-1, 1] {
+                    crosses.move(to: NSPoint(x: x - 0.75, y: y - 0.75 * slant)); crosses.line(to: NSPoint(x: x + 0.75, y: y + 0.75 * slant))
+                }
+            }
+            if l.mouth > 0 { face.appendOval(in: oval(cx, t.eyeY + down - 2.4, 0.85 * l.mouth, 1.15 * l.mouth)) }
+            if l.tilt != 0 || l.squash != 0 {
+                var bend = AffineTransform(translationByX: cx, byY: 0)
+                bend.rotate(byDegrees: l.tilt)
+                bend.scale(x: 1 + 0.08 * l.squash, y: 1 - 0.2 * l.squash)
+                bend.translate(x: -cx, y: 0)
+                for path in [head, face, crosses] { path.transform(using: bend) }
             }
             if cellUp < 1 {     // the braincell is passing behind: don't let it show through
-                NSGraphicsContext.current?.cgContext.setBlendMode(.clear); head.fill()
-                NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+                cg.setBlendMode(.clear); head.fill(); cg.setBlendMode(.normal)
             }
-            if hollow {
-                ink.setStroke()
-                head.lineWidth = 1.1
-                head.stroke()
-                eyes.fill()
-            } else {
-                head.append(eyes)
-                head.windingRule = .evenOdd
-                head.fill()
+            crosses.lineWidth = 0.6; crosses.lineCapStyle = .round
+            if hollow {         // my friend's is an outline with solid eyes
+                ink.setStroke(); head.lineWidth = 1.1; head.stroke()
+                ink.setFill(); face.fill()
+                ink.withAlphaComponent(ink.alphaComponent * ko).setStroke(); crosses.stroke()
+            } else {            // mine is solid, with the eyes cut out
+                ink.setFill(); head.fill()
+                cg.setBlendMode(.destinationOut)
+                NSColor.black.setFill(); face.fill()
+                NSColor.black.withAlphaComponent(ko).setStroke(); crosses.stroke()
+                cg.setBlendMode(.normal)
             }
         }
 
-        if cellUp >= 1 { accent.setFill(); NSBezierPath(ovalIn: cellSpot).fill() }
+        ink.setFill()
+        for (i, t) in twin.enumerated() {       // the ledge cuts the paws into flat-bottomed mitts
+            let l = limb[i]
+            for (n, side) in [CGFloat(-1), 1].enumerated() {
+                var x = ox + t.x + side * t.paw + (n == 0 ? l.pawX.0 : l.pawX.1), y = pawLift + 0.7 + (n == 0 ? l.pawY.0 : l.pawY.1)
+                if n != i {     // the inner paw can go and fetch the braincell
+                    x += (cellSpot.midX - x) * l.reach.x; y += (cellSpot.midY - 2.6 - y) * l.reach.y
+                }
+                NSBezierPath(ovalIn: oval(x, y, 1.6, 1.35)).fill()
+            }
+        }
 
-        for z in zs {
-            let p = CGFloat((now - z.start) / 2.4)
+        accent.setFill()
+        if cellUp >= 1 { NSBezierPath(ovalIn: cellSpot).fill() }
+        let glint = CGFloat((now - twinkle) / 1.4)
+        if glint < 1 {
+            for (n, at) in ([(-3.8, 0.6), (3.6, 1.8), (0.4, 4.3)] as [(CGFloat, CGFloat)]).enumerated() {
+                let r = 1.6 * pow(sin(.pi * max(0, min(1, (glint - 0.2 * CGFloat(n)) / 0.6))), 2), pinch = r * 0.22
+                let x = cellSpot.midX + at.0, y = cellSpot.midY + at.1, star = NSBezierPath()
+                star.move(to: NSPoint(x: x, y: y + r)); star.line(to: NSPoint(x: x + pinch, y: y + pinch))
+                star.line(to: NSPoint(x: x + r, y: y)); star.line(to: NSPoint(x: x + pinch, y: y - pinch))
+                star.line(to: NSPoint(x: x, y: y - r)); star.line(to: NSPoint(x: x - pinch, y: y - pinch))
+                star.line(to: NSPoint(x: x - r, y: y)); star.line(to: NSPoint(x: x - pinch, y: y + pinch))
+                star.close(); star.fill()
+            }
+        }
+
+        for w in wisps {
+            let p = CGFloat((now - w.start) / 2.4)
             guard p > 0, p < 1 else { continue }
-            let half = 1.0 + 0.6 * p
-            let x = ox + z.x + z.side * 1.4 * p + sin(p * 2 * .pi) * 0.4, y = z.y + 5 * p
-            let path = NSBezierPath()
-            path.move(to: NSPoint(x: x - half, y: y + half)); path.line(to: NSPoint(x: x + half, y: y + half))
-            path.line(to: NSPoint(x: x - half, y: y - half)); path.line(to: NSPoint(x: x + half, y: y - half))
-            path.lineWidth = 0.7; path.lineCapStyle = .round; path.lineJoinStyle = .round
-            ink.withAlphaComponent(ink.alphaComponent * min(1, p * 4) * (1 - p) * pose["zs"]!).setStroke()
-            path.stroke()
+            let shade = ink.withAlphaComponent(ink.alphaComponent * min(1, p * 4) * (1 - p) * pose["zs"]!), path = NSBezierPath()
+            if w.sweat {        // a bead of sweat runs down beside the head
+                let x = ox + w.x, y = w.y - 3 * p
+                path.move(to: NSPoint(x: x, y: y + 1.4))
+                path.curve(to: NSPoint(x: x, y: y - 0.9), controlPoint1: NSPoint(x: x + 1.2, y: y - 0.1), controlPoint2: NSPoint(x: x + 0.9, y: y - 0.9))
+                path.curve(to: NSPoint(x: x, y: y + 1.4), controlPoint1: NSPoint(x: x - 0.9, y: y - 0.9), controlPoint2: NSPoint(x: x - 1.2, y: y - 0.1))
+                shade.setFill(); path.fill()
+            } else {            // a z drifts up and away
+                let half = (1.0 + 0.6 * p) * w.size
+                let x = ox + w.x + w.side * 1.4 * p + sin(p * 2 * .pi) * 0.4, y = w.y + 5 * p
+                path.move(to: NSPoint(x: x - half, y: y + half)); path.line(to: NSPoint(x: x + half, y: y + half))
+                path.line(to: NSPoint(x: x - half, y: y - half)); path.line(to: NSPoint(x: x + half, y: y - half))
+                path.lineWidth = 0.7; path.lineCapStyle = .round; path.lineJoinStyle = .round
+                shade.setStroke(); path.stroke()
+            }
         }
     }
 }
@@ -587,12 +762,14 @@ final class Twins: NSView {
 /// just falls asleep, and it leaves when someone has slept for `nap`.
 @MainActor final class MenuBarItem: NSObject, NSMenuDelegate {
     var nap = napFor
+    var hour: TimeInterval = 3600       // each one we've worked together today earns a high five
     private let item = NSStatusBar.system.statusItem(withLength: Twins.size.width + 4)
     private let twins = Twins()
     private let mine = NSMenuItem(), theirs = NSMenuItem(), tally = NSMenuItem()
     private var shown = false
     private var hideAt: Date?
     private var hideTimer: Timer?
+    private var fiveTimer: Timer?
     private var inkWatch: NSKeyValueObservation?
     private var ticked = [0, 0]
     private var together: TimeInterval = 0, bothSince: Date?, day = Date()   // how long we've both been working today
@@ -643,14 +820,16 @@ final class Twins: NSView {
         mine.title = "You: " + me.words
         theirs.title = "Friend: " + friend.words
         item.button?.toolTip = mine.title + "\n" + theirs.title
-        if !Calendar.current.isDate(now, inSameDayAs: day) { day = now; together = 0; bothSince = bothSince.map { _ in now } }
+        if !Calendar.current.isDate(now, inSameDayAs: day) { day = now; together = 0; bothSince = bothSince.map { _ in now }; fiveTimer?.invalidate(); fiveTimer = nil }
         if both { bothSince = bothSince ?? now } else if let since = bothSince { together += now.timeIntervalSince(since); bothSince = nil }
+        if both != (fiveTimer != nil) { scheduleFive() }
 
         seat()
         if me.busy { twins.setDoing(0, me.doing) }
         if friend.busy { twins.setDoing(1, friend.doing) }
+        twins.setMood(0, me.mood); twins.setMood(1, friend.mood)
         let ticks = [me.busy ? me.ticked : 0, friend.busy ? friend.ticked : 0]
-        for who in 0..<2 where shown && ticks[who] > ticked[who] { twins.cheer(who) }
+        for who in 0..<2 where shown && ticks[who] > ticked[who] { twins.tick(who) }
         ticked = ticks
 
         if both {
@@ -674,6 +853,20 @@ final class Twins: NSView {
         }
     }
 
+    private func scheduleFive() {
+        fiveTimer?.invalidate(); fiveTimer = nil
+        guard let since = bothSince else { return }
+        let done = together + Date().timeIntervalSince(since)
+        fiveTimer = after(hour - done.truncatingRemainder(dividingBy: hour) + 0.5) { [weak self] in
+            self?.twins.highFive(); self?.scheduleFive()
+        }
+    }
+
+    /// The demo runs on a fast clock, and rare moments come up often.
+    func showOff() {
+        nap = 8; hour = 30; twins.showOff = true
+    }
+
     private func hide() {
         shown = false; hideAt = nil; hideTimer = nil
         log("twins: leave")
@@ -684,22 +877,27 @@ final class Twins: NSView {
     }
 }
 
-/// `Braincell --demo` acts out a short script, so you can see the twins without a friend.
+/// `Braincell --demo` acts out a script, rare moments included, so you can see the twins without a friend.
 @MainActor func demo() {
     let item = MenuBarItem(extras: [])
-    item.nap = 8
-    func m(_ doing: Doing, _ label: String? = nil, ticked: Int = 0) -> Mind { Mind(busy: true, doing: doing, label: label, ticked: ticked) }
+    item.showOff()
+    func m(_ doing: Doing, _ label: String? = nil, ticked: Int = 0, mood: Mood = .fine) -> Mind {
+        Mind(busy: true, doing: doing, label: label, ticked: ticked, mood: mood)
+    }
     let script: [(at: Double, me: Mind, friend: Mind)] = [
         (0.5, m(.think), m(.think)),
         (4, m(.write, "adding custom widgets"), m(.read, "tracing the login bug")),
-        (9, m(.run, "running the tests"), m(.web, "reading the docs")),
-        (14, m(.write, "fixing the layout"), m(.write, "patching the login")),
-        (20, m(.plan, "polishing the menu", ticked: 1), m(.team, "reviewing with agents")),
-        (25, m(.wait), m(.write, "patching the login")),
-        (29, m(.think), Mind()),
-        (35, m(.think), m(.think)),
-        (39, Mind(), m(.write, "patching the login")),
-        (43, Mind(), Mind()),
+        (9, m(.run, "running the tests"), Mind()),
+        (14, m(.run, "running the tests"), m(.think)),
+        (18, m(.write, "fixing the layout"), m(.write, "patching the login")),
+        (23, m(.plan, "polishing the menu", ticked: 1), m(.team, "reviewing with agents")),
+        (28, m(.tidy, ticked: 1), m(.write, "patching the login", ticked: 1)),
+        (32, m(.wait, ticked: 1), m(.write, "patching the login", ticked: 1)),
+        (37, m(.think, ticked: 1), m(.web, "reading the docs", ticked: 1)),
+        (42, m(.think, ticked: 1), m(.web, "reading the docs", ticked: 1, mood: .fresh)),
+        (48, Mind(), m(.think, ticked: 1, mood: .weary)),
+        (53, Mind(mood: .spent), m(.think, ticked: 1, mood: .weary)),
+        (58, Mind(mood: .spent), Mind(mood: .weary)),
     ]
     for act in script {
         after(act.at) { item.update(me: act.me, friend: act.friend, stopped: [act.me.busy ? nil : Date(), act.friend.busy ? nil : Date()]) }
@@ -742,13 +940,14 @@ struct Config: Decodable { let server: String, room: String, id: String }
         var line: [String: Any] = ["id": me, "busy": mind.busy]
         if mind.busy { line["doing"] = mind.doing.rawValue; line["ticked"] = mind.ticked }
         if mind.busy, let label = mind.label { line["label"] = label }
+        if mind.mood != .fine { line["mood"] = mind.mood.rawValue }
         guard let plain = try? JSONSerialization.data(withJSONObject: line),
               let sealed = try? ChaChaPoly.seal(plain, using: key).combined else { return }
         var r = URLRequest(url: topic)
         r.httpMethod = "POST"
         r.httpBody = Data(sealed.base64EncodedString().utf8)
         r.timeoutInterval = 20
-        let what = "busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-") ticked=\(mind.ticked)"
+        let what = "busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-") ticked=\(mind.ticked) \(mind.mood.rawValue)"
         posting?.cancel()       // only the newest state matters
         posting = session.dataTask(with: r) { _, response, error in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -802,7 +1001,8 @@ struct Config: Decodable { let server: String, room: String, id: String }
         // A friend's words are shown as plain text, but keep them short and printable all the same.
         let label = (inner["label"] as? String).map { String(String.UnicodeScalarView($0.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(40))) }
         let mind = Mind(busy: busy, doing: Doing(rawValue: inner["doing"] as? String ?? "") ?? .think,
-                        label: label?.isEmpty == false ? label : nil, ticked: inner["ticked"] as? Int ?? 0)
+                        label: label?.isEmpty == false ? label : nil, ticked: inner["ticked"] as? Int ?? 0,
+                        mood: Mood(rawValue: inner["mood"] as? String ?? "") ?? .fine)
         let sent = time.map { Date(timeIntervalSince1970: $0 + skew) } ?? Date()
         onFriend(id, mind, min(sent, Date()))
     }
@@ -821,6 +1021,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
     private var lastSent = Date.distantPast
     private var retryAt: Date?, backoff: TimeInterval = 15          // the last message didn't get through
     private var idleSince: Date?
+    private var worked: TimeInterval = 0, workingSince: Date?, workDay = Date()    // how long my Claude has worked today
     private var budget = 0, budgetFrom = Date.distantPast           // today's allowance of "what I'm doing" updates
     private var wake: Timer?
     private var settling = false
@@ -846,7 +1047,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
         }
         relay = Relay(config) { [weak self] id, mind, sent in
             self?.friends[id] = (mind.busy ? sent.addingTimeInterval(friendLease) : .distantPast, sent, mind)
-            log("friend \(id): busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-") ticked=\(mind.ticked)")
+            log("friend \(id): busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-") ticked=\(mind.ticked) \(mind.mood.rawValue)")
             self?.settle()
         }
         relay?.listen()
@@ -885,8 +1086,24 @@ struct Config: Decodable { let server: String, room: String, id: String }
         var me = Mind()
         if let newest = liveSessions(now).max(by: { $0.touched < $1.touched }) {
             me = sessions[newest.id]?.mind ?? Mind(busy: true)
-            latest = me
             consider(newest.touched.addingTimeInterval(staleAfter))
+        }
+
+        // My mood: out of usage, on a Claude model I haven't used before, or worn out by a long day.
+        // The hook leaves a flag file for the first two.
+        if !Calendar.current.isDate(now, inSameDayAs: workDay) { workDay = now; worked = 0; workingSince = workingSince.map { _ in now } }
+        if me.busy { workingSince = workingSince ?? now } else if let since = workingSince { worked += now.timeIntervalSince(since); workingSince = nil }
+        let today = worked + (workingSince.map { now.timeIntervalSince($0) } ?? 0)
+        func flagged(_ name: String, hours: Double) -> Bool {
+            let made = (try? FileManager.default.attributesOfItem(atPath: home.appendingPathComponent(name).path))?[.modificationDate] as? Date
+            guard let ends = made?.addingTimeInterval(hours * 3600), ends > now else { return false }
+            consider(ends)
+            return true
+        }
+        me.mood = flagged("spent", hours: 5) ? .spent : flagged("fresh", hours: 12) ? .fresh : today >= longDay ? .weary : .fine
+        if me.busy {
+            latest = me
+            if today < longDay { consider(now.addingTimeInterval(longDay - today)) }
         }
 
         // My friend hears "busy" at once, "idle" after the grace period, and what I'm doing now and then.
@@ -894,8 +1111,9 @@ struct Config: Decodable { let server: String, room: String, id: String }
         let say = me.busy || (told.busy && now.timeIntervalSince(idleSince!) < idleGrace)
         if !me.busy && say { consider(idleSince!.addingTimeInterval(idleGrace)) }
         var news = say ? latest : Mind()
+        news.mood = me.mood
         if sharing.state == .off { news.label = nil }
-        let flipped = news.busy != told.busy || lastSent == .distantPast
+        let flipped = news.busy != told.busy || lastSent == .distantPast || (!say && news.mood != told.mood)
         let overdue = say && now.timeIntervalSince(lastSent) >= reannounce
         let retry = retryAt.map { now >= $0 } ?? false
         var detail = false
@@ -918,11 +1136,12 @@ struct Config: Decodable { let server: String, room: String, id: String }
         // My friend: busy until their lease runs out.
         let live = friends.values.filter { $0.until > now }
         live.forEach { consider($0.until) }
-        let friend = live.max { $0.until < $1.until }?.mind ?? Mind()
+        let last = friends.values.max { $0.since < $1.since }?.mind
+        let friend = live.max { $0.until < $1.until }?.mind ?? Mind(mood: last?.mood ?? .fine)
         // When they went quiet: their last "idle", or the moment a lapsed "busy" ran out.
         let friendStopped = friends.values.map { $0.mind.busy ? $0.until : $0.since }.max() ?? .distantPast
 
-        log("me: \(me.words) [\(me.doing.rawValue)]  friend: \(friend.words) [\(friend.doing.rawValue)]  say=\(say)")
+        log("me: \(me.words) [\(me.doing.rawValue) \(me.mood.rawValue)]  friend: \(friend.words) [\(friend.doing.rawValue) \(friend.mood.rawValue)]  say=\(say)")
         item.update(me: me, friend: friend, stopped: [me.busy ? nil : idleSince, friend.busy ? nil : friendStopped])
 
         wake?.invalidate()

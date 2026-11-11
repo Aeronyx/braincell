@@ -1,10 +1,11 @@
 #!/bin/sh
-# Braincell's Claude Code hook: hook busy|tool|wait|beat|idle, with the event JSON on stdin.
+# Braincell's Claude Code hook: hook <what happened>, with the event JSON on stdin.
 # Keeps one small log per session that is mid-turn, for the app to read. It stores tool names,
-# Claude's one-line command descriptions and its to-do list: never prompts, code or commands.
-# It prints nothing and never touches the network.
+# Claude's one-line command descriptions, its to-do list and the names of the models you've used:
+# never prompts, code or commands. It prints nothing and never touches the network.
 umask 077
-dir="${BRAINCELL_HOME:-$HOME/.braincell}/busy"
+home="${BRAINCELL_HOME:-$HOME/.braincell}"
+dir="$home/busy"
 event=$( { head -c 4096; cat >/dev/null; } | tr '\n\r' '  ')
 case "$event" in *\"session_id\"*) ;; *) exit 0 ;; esac
 id=${event#*\"session_id\"}; id=${id#*\"}; id=${id%%\"*}
@@ -15,6 +16,7 @@ ping() { : > "$dir/.ping.$$" && rm -f "$dir/.ping.$$"; }   # a folder event, so 
 case "$1" in
   busy) mkdir -p "$dir" && rm -f "$log" && echo prompt > "$log" ;;      # a turn started
   tool) mkdir -p "$dir"; [ -e "$log" ] || echo prompt > "$log"          # a tool is about to run
+        rm -f "$home/spent"
         name=${event#*\"tool_name\"}; name=${name#*\"}; name=${name%%\"*}
         case "$name" in
           TodoWrite|TaskCreate|TaskUpdate|*update_plan) printf 'tool %s\n' "$event" ;;
@@ -24,8 +26,16 @@ case "$1" in
           *) printf 'tool {"tool_name":"%s"}\n' "$name" ;;
         esac >> "$log"; ping ;;
   wait) [ -e "$log" ] && echo wait >> "$log" && ping ;;                 # Claude is asking for permission
+  tidy) [ -e "$log" ] && echo tidy >> "$log" && ping ;;                 # Claude is compacting its context
   beat) if [ "$(tail -c 5 "$log" 2>/dev/null)" = wait ]; then echo done >> "$log"; ping
         else touch -c "$log" 2>/dev/null; fi ;;                         # a tool finished: still going
-  idle) rm -f "$log" ;;                                                 # the turn ended
+  idle) rm -f "$log" "$home/spent" ;;                                   # the turn ended
+  quit) rm -f "$log" ;;                                                 # the session ended, or sat idle
+  fail) case "$event" in *\"rate_limit\"*) : > "$home/spent" ;; esac    # the turn died: out of usage?
+        rm -f "$log" ;;
+  model) case "$event" in *\"model\"*) ;; *) exit 0 ;; esac             # a session started: is its model new here?
+        model=${event#*\"model\"}; model=${model#*\"}; model=${model%%\"*}; model=${model%%\[*}
+        case "$model" in ""|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+        grep -qxF "$model" "$home/models" 2>/dev/null || { echo "$model" >> "$home/models"; : > "$home/fresh"; } ;;
 esac
 exit 0

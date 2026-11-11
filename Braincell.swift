@@ -179,13 +179,13 @@ struct Session {
 
 // MARK: - The twins
 
-/// Draws the two peekers and their braincell. Coordinates are points, with y = 0 on the invisible
-/// ledge they peek over, which sits level with the bottoms of the other menu bar icons. Anything
-/// below it is out of sight. Movement comes in short bursts; between them nothing is redrawn and
+/// Draws the two peekers and their braincell. Coordinates are points, with y = 0 on the ledge they
+/// peek over: the menu bar's bottom edge, or an invisible line level with the bottoms of the other
+/// icons. Anything below it is out of sight. Movement comes in short bursts; between them nothing is redrawn and
 /// no timer runs.
 final class Twins: NSView {
     static let size = NSSize(width: 34, height: 18)
-    static let ledgeBelowCenter: CGFloat = 8     // how far under the menu bar's midline the ledge sits
+    static let ledgeBelowCenter: CGFloat = 8     // when centered, how far under the menu bar's midline the ledge sits
 
     private struct Twin { let x, width, top, eyeGap, eyeY, paw: CGFloat }
     private let twin = [
@@ -195,8 +195,9 @@ final class Twins: NSView {
 
     // Slow poses, tweened. paws, up0, up1, cellUp: 0 = hidden below the ledge, 1 = in place.
     // sink: 1 = dozing low. lid: 1 = eyes shut. perch: 1 = the braincell is set down on their joined paws.
+    // center: 0 = the ledge is the menu bar's bottom edge, 1 = it's level with the other icons.
     private var pose: [String: CGFloat] = ["paws": 0, "up0": 0, "up1": 0, "cellUp": 0,
-                                           "sink0": 0, "sink1": 0, "lid0": 0, "lid1": 0, "perch": 0]
+                                           "sink0": 0, "sink1": 0, "lid0": 0, "lid1": 0, "perch": 0, "center": 0]
     private enum Ease { case smooth, spring, windUp }    // spring overshoots at the end; windUp pulls back first
     private struct Tween { let start: CFTimeInterval, length: Double, from, to: CGFloat, ease: Ease, then: (() -> Void)? }
     private var tweens: [String: Tween] = [:]
@@ -214,8 +215,10 @@ final class Twins: NSView {
 
     // A gesture is one short burst of movement by one twin.
     private enum Move { case act(Doing), catchIt, bump }
-    private struct Gesture { let move: Move, start: CFTimeInterval, length: Double }
+    private struct Gesture { let move: Move, start: CFTimeInterval, length: Double; var cut: CFTimeInterval? }
     private var gesture: [Gesture?] = [nil, nil]
+    private var queued: [(move: Move, length: Double)?] = [nil, nil]   // waits for the current gesture to finish
+    private var settled: [CFTimeInterval] = [0, 0]                     // no gesture starts before this: a twin that just arrived or woke takes a moment
 
     private var frames: Timer?
     private var life: Timer?
@@ -226,20 +229,33 @@ final class Twins: NSView {
 
     // MARK: Poses
 
+    /// Moves the ledge between the menu bar's bottom edge and the line the other icons sit on.
+    func setCentered(_ on: Bool, animated: Bool) {
+        if animated { move("center", to: on ? 1 : 0, over: 0.5) } else { pose["center"] = on ? 1 : 0; needsDisplay = true }
+    }
+
     /// Up from nowhere: paws grab the ledge, the heads hop up one after the other, and the
     /// braincell pops out from behind whoever holds it. Then they bump paws.
     func arrive() {
-        tweens.removeAll(); hop = nil; gesture = [nil, nil]
+        let center = tweens["center"]
+        tweens.removeAll(); tweens["center"] = center
+        hop = nil; gesture = [nil, nil]; queued = [nil, nil]
+        settled = [CACurrentMediaTime() + 1.2, CACurrentMediaTime() + 1.2]
         awake = [true, true]
-        for key in ["sink0", "sink1", "lid0", "lid1"] { pose[key] = 0 }
-        holder = Bool.random() ? 0 : 1
-        let spot = cellSpot()
-        cellAt = spot.at; pose["perch"] = spot.perched ? 1 : 0
+        for who in 0..<2 {
+            if pose["up\(who)"]! == 0 { pose["sink\(who)"] = 0; pose["lid\(who)"] = 0 }             // out of sight: just reset
+            else { move("lid\(who)", to: 0, over: 0.25); move("sink\(who)", to: 0, over: 0.5, .spring) }   // caught mid-exit: wake up smoothly
+        }
+        if pose["cellUp"]! == 0 {      // only choose a new spot for the braincell while nobody can see it
+            holder = Bool.random() ? 0 : 1
+            let spot = cellSpot()
+            cellAt = spot.at; pose["perch"] = spot.perched ? 1 : 0
+        }
         let first = Bool.random() ? 0 : 1
-        move("paws", to: 1, over: 0.25, .spring)
-        move("up\(first)", to: 1, over: 0.45, .spring, delay: 0.15)
-        move("up\(1 - first)", to: 1, over: 0.45, .spring, delay: 0.3)
-        move("cellUp", to: 1, over: 0.4, .spring, delay: 0.7) { [weak self] in
+        move("paws", to: 1, over: 0.25, .spring, delay: 0.12)      // a beat for the menu bar to make room
+        move("up\(first)", to: 1, over: 0.45, .spring, delay: 0.27)
+        move("up\(1 - first)", to: 1, over: 0.45, .spring, delay: 0.42)
+        move("cellUp", to: 1, over: 0.4, .spring, delay: 0.82) { [weak self] in
             self?.start(.bump, on: 0, for: 0.45); self?.start(.bump, on: 1, for: 0.45)
         }
         nextPass = CACurrentMediaTime() + .random(in: 8...20)
@@ -250,7 +266,7 @@ final class Twins: NSView {
     /// paws let go last. Only then is the status item itself taken away.
     func leave(then done: @escaping () -> Void) {
         life?.invalidate(); life = nil
-        gesture = [nil, nil]
+        calm(0); calm(1)
         if let h = hop { cellAt = h.to; hop = nil }
         move("cellUp", to: 0, over: 0.35)
         move("up0", to: 0, over: 0.45, .windUp, delay: 0.25)
@@ -262,10 +278,11 @@ final class Twins: NSView {
         guard awake[who] != on else { return }
         awake[who] = on
         if on {
-            move("lid\(who)", to: 0, over: 0.15)
-            move("sink\(who)", to: 0, over: 0.4, .spring)
+            settled[who] = CACurrentMediaTime() + 0.9     // open its eyes and straighten up before doing anything
+            move("lid\(who)", to: 0, over: 0.25)
+            move("sink\(who)", to: 0, over: 0.5, .spring)
         } else {
-            gesture[who] = nil
+            calm(who)
             move("lid\(who)", to: 1, over: 0.3)
             move("sink\(who)", to: 1, over: 0.7)
         }
@@ -313,8 +330,15 @@ final class Twins: NSView {
     }
 
     private func start(_ move: Move, on who: Int, for length: Double) {
-        gesture[who] = Gesture(move: move, start: CACurrentMediaTime(), length: length)
+        if gesture[who] != nil { queued[who] = (move, length); return }    // never cut a movement short: it waits its turn
+        gesture[who] = Gesture(move: move, start: max(CACurrentMediaTime(), settled[who]), length: length, cut: nil)
         run()
+    }
+
+    /// Eases a twin out of whatever it's doing, rather than snapping it back to rest.
+    private func calm(_ who: Int) {
+        queued[who] = nil
+        if gesture[who] != nil, gesture[who]!.cut == nil { gesture[who]!.cut = CACurrentMediaTime() }
     }
 
     // MARK: The braincell
@@ -334,7 +358,7 @@ final class Twins: NSView {
     private func placeCell() {
         let now = CACurrentMediaTime(), spot = cellSpot()
         if (pose["perch"]! > 0.5) != spot.perched { move("perch", to: spot.perched ? 1 : 0, over: 0.7) }
-        guard hop == nil, spot.at != cellAt, now - lastHop > 2.5 else { return }   // the life timer tries again
+        guard hop == nil, tweens["cellUp"] == nil, spot.at != cellAt, now - lastHop > 2.5 else { return }   // the life timer tries again
         let pair = [doing[0], doing[1]]
         var style = (length: 0.8, height: CGFloat(1.8), wobble: CGFloat(0), hard: false)                       // an easy lob
         if pair.contains(.run) || pair.contains(.write) { style = (0.38, 0.7, 0, true) }                      // busy hands: a quick flat toss
@@ -344,7 +368,7 @@ final class Twins: NSView {
         run()
     }
 
-    // MARK: Tweening (a 30 fps timer that exists only while something is moving)
+    // MARK: Tweening (a 60 fps timer that exists only while something is moving)
 
     private func move(_ key: String, to: CGFloat, over length: Double, _ ease: Ease = .smooth, delay: Double = 0, then: (() -> Void)? = nil) {
         tweens[key] = Tween(start: CACurrentMediaTime() + delay, length: length, from: pose[key]!, to: to, ease: ease, then: then)
@@ -352,7 +376,7 @@ final class Twins: NSView {
     }
 
     private func run() {
-        if frames == nil { frames = after(1.0 / 30, repeats: true) { [weak self] in self?.step() } }
+        if frames == nil { frames = after(1.0 / 60, repeats: true) { [weak self] in self?.step() } }
     }
 
     private func step() {
@@ -370,9 +394,13 @@ final class Twins: NSView {
         }
         if let h = hop, now - h.start >= h.length {
             cellAt = h.to; hop = nil; lastHop = now
-            if h.hard, h.to != 0.5, awake[Int(h.to)] { start(.catchIt, on: Int(h.to), for: 0.3) }   // caught it
+            if h.hard, h.to != 0.5, awake[Int(h.to)], gesture[Int(h.to)] == nil { start(.catchIt, on: Int(h.to), for: 0.3) }   // caught it
         }
-        for who in 0..<2 { if let g = gesture[who], now - g.start >= g.length { gesture[who] = nil } }
+        for who in 0..<2 {
+            guard let g = gesture[who], now - g.start >= g.length || g.cut.map({ now - $0 >= 0.25 }) == true else { continue }
+            gesture[who] = nil
+            if let next = queued[who] { queued[who] = nil; start(next.move, on: who, for: next.length) }
+        }
         if tweens.isEmpty && hop == nil && gesture[0] == nil && gesture[1] == nil { frames?.invalidate(); frames = nil }
         needsDisplay = true
     }
@@ -389,13 +417,17 @@ final class Twins: NSView {
         var l = Limbs()
         guard let g = gesture[who] else { return l }
         let p = CGFloat(min(1, max(0, (now - g.start) / g.length)))
-        let ease = min(1, p * 5, (1 - p) * 5)                                // fade in and out of the gesture
+        let fade = CGFloat(g.cut.map { max(0, 1 - (now - $0) / 0.25) } ?? 1)   // easing out early, if it was asked to stop
+        let ramp = min(1, p * 4, (1 - p) * 4)
+        let ease = ramp * ramp * (3 - 2 * ramp) * fade                       // glide in and out of the gesture
         func wave(_ cycles: CGFloat) -> CGFloat { sin(p * cycles * 2 * .pi) }
         switch g.move {
         case .act(.think):      // gazes up, pondering
             l.gazeY = 0.45 * ease
-        case .act(.read):       // eyes sweep along three lines
-            l.gazeX = (2 * (p * 3).truncatingRemainder(dividingBy: 1) - 1) * 0.85 * ease; l.gazeY = -0.35 * ease
+        case .act(.read):       // eyes travel along three lines, gliding back to the start of each
+            let line = (p * 3).truncatingRemainder(dividingBy: 1)
+            let along = line < 0.8 ? line / 0.8 : 1 - (line - 0.8) / 0.2
+            l.gazeX = (2 * along * along * (3 - 2 * along) - 1) * 0.85 * ease; l.gazeY = -0.35 * ease
         case .act(.write):      // paws type
             l.pawY = (max(0, wave(6)) * 1.1 * ease, max(0, -wave(6)) * 1.1 * ease); l.gazeY = -0.4 * ease
         case .act(.run):        // three little hops
@@ -410,9 +442,9 @@ final class Twins: NSView {
             l.tilt = (who == 0 ? 5 : -5) * ease; l.gazeY = -0.3 * ease
             if who == 0 { l.pawY.0 = 2.8 * ease; l.pawX.0 = wave(3) * 0.8 * ease } else { l.pawY.1 = 2.8 * ease; l.pawX.1 = wave(3) * 0.8 * ease }
         case .catchIt:          // dips as the braincell lands
-            l.head = -0.8 * sin(.pi * p)
+            l.head = -0.8 * sin(.pi * p) * fade
         case .bump:             // the paws they hold bump once
-            if who == 0 { l.pawY.1 = 1.6 * sin(.pi * p) } else { l.pawY.0 = 1.6 * sin(.pi * p) }
+            if who == 0 { l.pawY.1 = 1.6 * sin(.pi * p) * fade } else { l.pawY.0 = 1.6 * sin(.pi * p) * fade }
         }
         return l
     }
@@ -421,16 +453,17 @@ final class Twins: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let dark = (button ?? self).effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        // The ledge is invisible. It sits where the bottoms of the other menu bar icons are, so the
-        // twins line up with them, and everything below it is clipped away.
+        // The ledge: the bottom of the status item's window (the menu bar's real bottom edge), or an
+        // invisible line level with the other icons. Everything below it is clipped away.
         let shift = NSAffineTransform()
-        shift.translateX(by: 0, yBy: bounds.midY - Twins.ledgeBelowCenter)
+        shift.translateX(by: 0, yBy: (bounds.midY - Twins.ledgeBelowCenter) * pose["center"]!)
         shift.concat()
         NSBezierPath(rect: NSRect(x: bounds.minX, y: 0, width: bounds.width, height: bounds.height)).addClip()
         paint(dark: dark, originX: (bounds.width - Twins.size.width) / 2, at: CACurrentMediaTime())
     }
 
-    private func paint(dark: Bool, originX ox: CGFloat, at now: CFTimeInterval) {
+    /// backdrop: what is behind the twins when that isn't the live menu bar (only the snapshot needs it).
+    private func paint(dark: Bool, originX ox: CGFloat, at now: CFTimeInterval, backdrop: NSColor? = nil) {
         let ink = dark ? NSColor(white: 1, alpha: 0.92) : NSColor(white: 0, alpha: 0.85)
         let perch = pose["perch"]!, cellUp = pose["cellUp"]!
         let pawLift = (pose["paws"]! - 1) * 4
@@ -466,36 +499,55 @@ final class Twins: NSView {
             let paws: [(CGFloat, CGFloat, CGFloat)] = [(-1, l.pawX.0, l.pawY.0), (1, l.pawX.1, l.pawY.1)]
             for (side, dx, dy) in paws { NSBezierPath(ovalIn: oval(cx + side * t.paw + dx, pawLift + 0.7 + dy, 1.6, 1.35)).fill() }
 
-            // Head, with the eyes punched out so the menu bar shows through.
+            // Mine is solid with the eyes punched out so the menu bar shows through. My friend's is
+            // hollow: an outline with solid eyes. That's how you tell whose is whose.
+            let hollow = i == 1
+            let edge: CGFloat = hollow ? 0.55 : 0          // keeps the outline inside the same silhouette
+            let wide = half - edge, top = t.top + down - edge, shoulder = top - wide * 0.95
             let head = NSBezierPath()
-            head.windingRule = .evenOdd
-            let top = t.top + down, shoulder = top - half * 0.95
-            head.move(to: NSPoint(x: cx - half, y: -12))
-            head.line(to: NSPoint(x: cx - half, y: shoulder))
+            head.move(to: NSPoint(x: cx - wide, y: -12))
+            head.line(to: NSPoint(x: cx - wide, y: shoulder))
             head.curve(to: NSPoint(x: cx, y: top),
-                       controlPoint1: NSPoint(x: cx - half, y: shoulder + half * 0.55),
-                       controlPoint2: NSPoint(x: cx - half * 0.56, y: top))
-            head.curve(to: NSPoint(x: cx + half, y: shoulder),
-                       controlPoint1: NSPoint(x: cx + half * 0.56, y: top),
-                       controlPoint2: NSPoint(x: cx + half, y: shoulder + half * 0.55))
-            head.line(to: NSPoint(x: cx + half, y: -12))
+                       controlPoint1: NSPoint(x: cx - wide, y: shoulder + wide * 0.55),
+                       controlPoint2: NSPoint(x: cx - wide * 0.56, y: top))
+            head.curve(to: NSPoint(x: cx + wide, y: shoulder),
+                       controlPoint1: NSPoint(x: cx + wide * 0.56, y: top),
+                       controlPoint2: NSPoint(x: cx + wide, y: shoulder + wide * 0.55))
+            head.line(to: NSPoint(x: cx + wide, y: -12))
             head.close()
 
-            // Eyes drift toward the braincell (the holder glances up, the other looks across), plus the gesture.
-            let holds = i == 0 ? 1 - cell : cell
-            let gazeX = max(-1.2, min(1.2, (i == 0 ? 0.55 : -0.55) * (1 - holds) + l.gazeX))
-            let gazeY = 0.35 * holds * (1 - perch) - 0.45 * perch + l.gazeY
+            // Eyes drift toward the braincell once it's out (the holder glances up, the other looks
+            // across), plus the gesture. The hollow twin's eyes stay clear of its outline.
+            let holds = i == 0 ? 1 - cell : cell, watching = max(0, min(1, cellUp))
+            let reach: CGFloat = hollow ? 0.55 : 1.2
+            let gazeX = max(-reach, min(reach, (i == 0 ? 0.55 : -0.55) * (1 - holds) * watching + l.gazeX))
+            let gazeY = (0.35 * holds * (1 - perch) - 0.45 * perch) * watching + l.gazeY
             let open = 1.2 * (1 - 0.75 * pose["lid\(i)"]!)
-            for side: CGFloat in [-1, 1] {
-                head.appendOval(in: oval(cx + side * t.eyeGap + gazeX, t.eyeY + down + gazeY, 1.0, open))
-            }
+            let eyes = NSBezierPath()
+            for side: CGFloat in [-1, 1] { eyes.appendOval(in: oval(cx + side * t.eyeGap + gazeX, t.eyeY + down + gazeY, 1.0, open)) }
             if l.tilt != 0 {
                 var turn = AffineTransform(translationByX: cx, byY: 0)
                 turn.rotate(byDegrees: l.tilt)
                 turn.translate(x: -cx, y: 0)
-                head.transform(using: turn)
+                head.transform(using: turn); eyes.transform(using: turn)
             }
-            head.fill()
+            if hollow {
+                if cellUp < 1 {     // the braincell is passing behind: don't let it show through the hollow body
+                    if let backdrop { backdrop.setFill(); head.fill(); ink.setFill() }
+                    else {
+                        NSGraphicsContext.current?.cgContext.setBlendMode(.clear); head.fill()
+                        NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+                    }
+                }
+                ink.setStroke()
+                head.lineWidth = 1.1
+                head.stroke()
+                eyes.fill()
+            } else {
+                head.append(eyes)
+                head.windingRule = .evenOdd
+                head.fill()
+            }
         }
 
         if cellUp >= 1 { accent.setFill(); NSBezierPath(ovalIn: cellSpot).fill() }
@@ -503,7 +555,7 @@ final class Twins: NSView {
 
     /// Renders a contact sheet of poses on light and dark menu bars, for tuning the look.
     static func snapshot(to path: String) {
-        func mid(_ what: Doing, _ p: Double) -> Gesture { Gesture(move: .act(what), start: -p, length: 1) }
+        func mid(_ what: Doing, _ p: Double) -> Gesture { Gesture(move: .act(what), start: -p, length: 1, cut: nil) }
         let scenes: [(Twins) -> Void] = [
             { _ in },                                                                      // both thinking
             { $0.hop = Hop(from: 0, to: 1, start: -0.5, length: 1, height: 1.8, wobble: 0, hard: false) },   // passing it over
@@ -524,7 +576,8 @@ final class Twins: NSView {
                                    hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         for (row, dark) in [true, false].enumerated() {
-            (dark ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.91, alpha: 1)).setFill()
+            let backdrop = dark ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.91, alpha: 1)
+            backdrop.setFill()
             NSRect(x: 0, y: CGFloat(row) * bar * scale, width: CGFloat(w), height: bar * scale).fill()
             for (col, scene) in scenes.enumerated() {
                 let view = Twins()
@@ -534,10 +587,9 @@ final class Twins: NSView {
                 let t = NSAffineTransform()
                 t.translateX(by: CGFloat(col) * cellW * scale, yBy: CGFloat(row) * bar * scale)
                 t.scale(by: scale)
-                t.translateX(by: 0, yBy: bar / 2 - Twins.ledgeBelowCenter)
                 t.concat()
                 NSBezierPath(rect: NSRect(x: 0, y: 0, width: cellW, height: bar)).addClip()
-                view.paint(dark: dark, originX: pad, at: 0)
+                view.paint(dark: dark, originX: pad, at: 0, backdrop: backdrop)
                 NSGraphicsContext.restoreGraphicsState()
             }
         }
@@ -560,11 +612,11 @@ final class Twins: NSView {
     private var hideTimer: Timer?
     private var inkWatch: NSKeyValueObservation?
 
-    init(remove: NSMenuItem) {
+    init(extras: [NSMenuItem]) {
         let menu = NSMenu()
         menu.autoenablesItems = false
         mine.isEnabled = false; theirs.isEnabled = false
-        for entry in [mine, theirs, .separator(), remove] { menu.addItem(entry) }
+        for entry in [mine, theirs, .separator()] + extras { menu.addItem(entry) }
         item.isVisible = false
         item.menu = menu
         twins.button = item.button
@@ -584,6 +636,8 @@ final class Twins: NSView {
         twins.autoresizingMask = [.width, .height]
         host.addSubview(twins)
     }
+
+    func setCentered(_ on: Bool, animated: Bool) { twins.setCentered(on, animated: animated) }
 
     /// stopped: when each of us went quiet (nil while working).
     func update(me: Mind, friend: Mind, stopped: [Date?]) {
@@ -720,11 +774,17 @@ struct Config: Decodable { let server: String, room: String, id: String }
     private var budget = 0, budgetFrom = Date.distantPast           // today's allowance of "what I'm doing" updates
     private var wake: Timer?
     private var settling = false
+    private let placement = NSMenuItem(title: "Sit on the bottom edge", action: #selector(togglePlacement), keyEquivalent: "")
+    private let centeredFlag = home.appendingPathComponent("centered")     // exists when the twins sit level with the other icons
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let remove = NSMenuItem(title: "Remove Braincell…", action: #selector(remove), keyEquivalent: "")
         remove.target = self
-        item = MenuBarItem(remove: remove)
+        let centered = FileManager.default.fileExists(atPath: centeredFlag.path)
+        placement.target = self
+        placement.state = centered ? .off : .on
+        item = MenuBarItem(extras: [placement, remove])
+        item.setCentered(centered, animated: false)
 
         guard let data = try? Data(contentsOf: home.appendingPathComponent("config.json")),
               let config = try? JSONDecoder().decode(Config.self, from: data), URL(string: config.server) != nil else {
@@ -845,6 +905,15 @@ struct Config: Decodable { let server: String, room: String, id: String }
     @objc private func didWake() {
         relay?.listen()
         settle()
+    }
+
+    /// Unticked, the twins float level with the other menu bar icons instead of sitting on the bar's bottom edge.
+    @objc private func togglePlacement() {
+        let centered = placement.state == .on
+        placement.state = centered ? .off : .on
+        if centered { FileManager.default.createFile(atPath: centeredFlag.path, contents: nil) }
+        else { try? FileManager.default.removeItem(at: centeredFlag) }
+        item.setCentered(centered, animated: true)
     }
 
     @objc private func remove() {

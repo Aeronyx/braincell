@@ -32,8 +32,8 @@ already have), and registers a login item. Claude Code sessions started after th
 
 ## What the twins do
 
-Yours is on the left, your friend's on the right. Each acts out what its Claude is doing, in
-short bursts with stillness in between:
+Yours is the solid one on the left; your friend's is the outlined one on the right. Each acts
+out what its Claude is doing, in short bursts with stillness in between:
 
 | Claude is | The twin |
 | --- | --- |
@@ -52,8 +52,10 @@ When you're both doing the same kind of work it hovers between the twins and the
 unison. If one Claude is waiting on its human the other twin gets it, and if both are waiting
 it's set down on their joined paws.
 
-They hop up from nowhere, in line with your other menu bar icons: paws first, then each head,
-then the braincell. Whoever stops falls asleep where they are, hands the braincell over, and
+They sit on the bottom edge of the menu bar, peeking up over whatever is below it. Untick "Sit
+on the bottom edge" in their menu to have them float level with your other menu bar icons instead.
+
+They hop up from nowhere: paws first, then each head, then the braincell. Whoever stops falls asleep where they are, hands the braincell over, and
 wakes when their Claude starts again. Once someone has slept for five minutes they all leave the
 way they came: the braincell drops away, the heads duck, and the paws let go last.
 

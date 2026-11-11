@@ -63,7 +63,7 @@ prebuilt. It compiles on your Mac.
   words out.
 - **It installs** `~/.braincell`, a login item, and its hooks in `~/.claude/settings.json`, next
   to any you already have. Removing it takes all three out.
-- **It costs** 0% CPU and about 15 MB of memory while hidden, under 2% of one core while the
+- **It costs** 0% CPU and about 15 MB of memory while hidden, about 2% of one core while the
   twins are out, and no tokens: the hooks print nothing.
 
 ## Remove

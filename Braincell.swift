@@ -13,7 +13,7 @@ let staleAfter: TimeInterval = 600    // a session log with no heartbeat for thi
 let idleGrace: TimeInterval = 20      // keep saying "busy" this long after my turn ends, to bridge back-to-back prompts
 let reannounce: TimeInterval = 600    // repeat "busy" this often so my friend's copy can't go stale
 let friendLease: TimeInterval = 1500  // forget a friend's "busy" that hasn't been repeated for this long
-let friendDoze: TimeInterval = 6      // how long the twins linger once my friend has stopped
+let linger: TimeInterval = 300        // whoever stops sleeps on the ledge this long before the twins leave
 let detailEvery: TimeInterval = 60    // tell my friend what I'm doing at most this often...
 let detailBudget = 120                // ...and at most this many times a day (ntfy.sh allows 250 messages in all)
 let shareWords = true                 // false: my friend sees the kind of work I'm doing, but not the few words about it
@@ -92,7 +92,7 @@ struct Mind: Equatable {
     var label: String?       // a few words from Claude's own to-do list or command description
 
     var words: String {
-        guard busy else { return "done for now" }
+        guard busy else { return "taking a break" }
         return (doing == .wait ? doing.phrase : label ?? doing.phrase) + "…"
     }
 }
@@ -179,11 +179,13 @@ struct Session {
 
 // MARK: - The twins
 
-/// Draws the two peekers and their braincell. Coordinates are points, with y = 0 on the ledge they
-/// peek over (the bottom edge of the menu bar). Movement comes in short bursts; between them
-/// nothing is redrawn and no timer runs.
+/// Draws the two peekers and their braincell. Coordinates are points, with y = 0 on the invisible
+/// ledge they peek over, which sits level with the bottoms of the other menu bar icons. Anything
+/// below it is out of sight. Movement comes in short bursts; between them nothing is redrawn and
+/// no timer runs.
 final class Twins: NSView {
     static let size = NSSize(width: 34, height: 18)
+    static let ledgeBelowCenter: CGFloat = 8     // how far under the menu bar's midline the ledge sits
 
     private struct Twin { let x, width, top, eyeGap, eyeY, paw: CGFloat }
     private let twin = [
@@ -191,10 +193,12 @@ final class Twins: NSView {
         Twin(x: 25.35, width: 9.4, top: 9.9, eyeGap: 2.0, eyeY: 5.4, paw: 6.65),    // my friend (inner paws touch)
     ]
 
-    // Slow poses, tweened. rise: 0 below the ledge, 1 up. sink: 1 = dozing low. lid: 1 = eyes shut.
-    // perch: 1 = the braincell has been set down on their joined paws.
-    private var pose: [String: CGFloat] = ["rise": 0, "sink0": 0, "sink1": 0, "lid0": 0, "lid1": 0, "perch": 0]
-    private struct Tween { let start: CFTimeInterval, length: Double, from, to: CGFloat, springy: Bool, then: (() -> Void)? }
+    // Slow poses, tweened. paws, up0, up1, cellUp: 0 = hidden below the ledge, 1 = in place.
+    // sink: 1 = dozing low. lid: 1 = eyes shut. perch: 1 = the braincell is set down on their joined paws.
+    private var pose: [String: CGFloat] = ["paws": 0, "up0": 0, "up1": 0, "cellUp": 0,
+                                           "sink0": 0, "sink1": 0, "lid0": 0, "lid1": 0, "perch": 0]
+    private enum Ease { case smooth, spring, windUp }    // spring overshoots at the end; windUp pulls back first
+    private struct Tween { let start: CFTimeInterval, length: Double, from, to: CGFloat, ease: Ease, then: (() -> Void)? }
     private var tweens: [String: Tween] = [:]
 
     private var awake = [true, true]
@@ -222,24 +226,36 @@ final class Twins: NSView {
 
     // MARK: Poses
 
+    /// Up from nowhere: paws grab the ledge, the heads hop up one after the other, and the
+    /// braincell pops out from behind whoever holds it. Then they bump paws.
     func arrive() {
         tweens.removeAll(); hop = nil; gesture = [nil, nil]
         awake = [true, true]
-        pose = ["rise": pose["rise"]!, "sink0": 0, "sink1": 0, "lid0": 0, "lid1": 0, "perch": 0]
+        for key in ["sink0", "sink1", "lid0", "lid1"] { pose[key] = 0 }
         holder = Bool.random() ? 0 : 1
         let spot = cellSpot()
         cellAt = spot.at; pose["perch"] = spot.perched ? 1 : 0
-        move("rise", to: 1, over: 0.5, springy: true) { [weak self] in   // up they come, then a paw bump
+        let first = Bool.random() ? 0 : 1
+        move("paws", to: 1, over: 0.25, .spring)
+        move("up\(first)", to: 1, over: 0.45, .spring, delay: 0.15)
+        move("up\(1 - first)", to: 1, over: 0.45, .spring, delay: 0.3)
+        move("cellUp", to: 1, over: 0.4, .spring, delay: 0.7) { [weak self] in
             self?.start(.bump, on: 0, for: 0.45); self?.start(.bump, on: 1, for: 0.45)
         }
         nextPass = CACurrentMediaTime() + .random(in: 8...20)
         scheduleLife()
     }
 
+    /// Back to nowhere: the braincell drops out of sight, each head winds up and ducks, and the
+    /// paws let go last. Only then is the status item itself taken away.
     func leave(then done: @escaping () -> Void) {
         life?.invalidate(); life = nil
         gesture = [nil, nil]
-        move("rise", to: 0, over: 0.35, then: done)
+        if let h = hop { cellAt = h.to; hop = nil }
+        move("cellUp", to: 0, over: 0.35)
+        move("up0", to: 0, over: 0.45, .windUp, delay: 0.25)
+        move("up1", to: 0, over: 0.45, .windUp, delay: 0.37)
+        move("paws", to: 0, over: 0.25, delay: 0.85, then: done)
     }
 
     func setAwake(_ who: Int, _ on: Bool) {
@@ -247,7 +263,7 @@ final class Twins: NSView {
         awake[who] = on
         if on {
             move("lid\(who)", to: 0, over: 0.15)
-            move("sink\(who)", to: 0, over: 0.4, springy: true)
+            move("sink\(who)", to: 0, over: 0.4, .spring)
         } else {
             gesture[who] = nil
             move("lid\(who)", to: 1, over: 0.3)
@@ -330,8 +346,8 @@ final class Twins: NSView {
 
     // MARK: Tweening (a 30 fps timer that exists only while something is moving)
 
-    private func move(_ key: String, to: CGFloat, over length: Double, springy: Bool = false, then: (() -> Void)? = nil) {
-        tweens[key] = Tween(start: CACurrentMediaTime(), length: length, from: pose[key]!, to: to, springy: springy, then: then)
+    private func move(_ key: String, to: CGFloat, over length: Double, _ ease: Ease = .smooth, delay: Double = 0, then: (() -> Void)? = nil) {
+        tweens[key] = Tween(start: CACurrentMediaTime() + delay, length: length, from: pose[key]!, to: to, ease: ease, then: then)
         run()
     }
 
@@ -342,8 +358,13 @@ final class Twins: NSView {
     private func step() {
         let now = CACurrentMediaTime()
         for (key, t) in tweens {
-            let p = min(1, (now - t.start) / t.length)
-            let eased = t.springy ? 1 + 2.7 * pow(p - 1, 3) + 1.7 * pow(p - 1, 2) : p * p * (3 - 2 * p)
+            let p = max(0, min(1, (now - t.start) / t.length))
+            let eased: Double
+            switch t.ease {
+            case .smooth: eased = p * p * (3 - 2 * p)
+            case .spring: eased = 1 + 2.7 * pow(p - 1, 3) + 1.7 * pow(p - 1, 2)
+            case .windUp: eased = 2.7 * p * p * p - 1.7 * p * p
+            }
             pose[key] = t.from + (t.to - t.from) * CGFloat(eased)
             if p >= 1 { tweens[key] = nil; t.then?() }
         }
@@ -400,18 +421,21 @@ final class Twins: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let dark = (button ?? self).effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        // The ledge is the bottom of the status item's window, which is the menu bar's real bottom edge.
-        let ledge = max(bounds.minY, convert(NSPoint.zero, from: nil).y)
+        // The ledge is invisible. It sits where the bottoms of the other menu bar icons are, so the
+        // twins line up with them, and everything below it is clipped away.
         let shift = NSAffineTransform()
-        shift.translateX(by: 0, yBy: ledge)
+        shift.translateX(by: 0, yBy: bounds.midY - Twins.ledgeBelowCenter)
         shift.concat()
+        NSBezierPath(rect: NSRect(x: bounds.minX, y: 0, width: bounds.width, height: bounds.height)).addClip()
         paint(dark: dark, originX: (bounds.width - Twins.size.width) / 2, at: CACurrentMediaTime())
     }
 
     private func paint(dark: Bool, originX ox: CGFloat, at now: CFTimeInterval) {
         let ink = dark ? NSColor(white: 1, alpha: 0.92) : NSColor(white: 0, alpha: 0.85)
-        let lift = (pose["rise"]! - 1) * 19        // the whole scene slides up from under the ledge
-        let perch = pose["perch"]!
+        let perch = pose["perch"]!, cellUp = pose["cellUp"]!
+        let pawLift = (pose["paws"]! - 1) * 4
+        // How far each head is from its resting height: hidden below the ledge, dozing low, or mid-gesture.
+        func drop(_ i: Int, _ l: Limbs) -> CGFloat { (pose["up\(i)"]! - 1) * (twin[i].top + 2.5) - pose["sink\(i)"]! * 3.4 + l.head }
         func oval(_ cx: CGFloat, _ cy: CGFloat, _ rx: CGFloat, _ ry: CGFloat) -> NSRect {
             NSRect(x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2)
         }
@@ -425,15 +449,22 @@ final class Twins: NSView {
         }
         let limb = [limbs(0, at: now), limbs(1, at: now)]
 
+        // The one braincell: above a head, between the two, or set down on their joined paws.
+        // While it's coming or going it passes behind the heads, as if popping out of one.
+        func rest(_ i: Int) -> CGFloat { twin[i].top + drop(i, limb[i]) + 3.1 }
+        let aloft = rest(0) + (rest(1) - rest(0)) * cell + arc
+        let cellSpot = oval(ox + twin[0].x + (twin[1].x - twin[0].x) * cell, -3 + (aloft + (3.6 - aloft) * perch + 3) * cellUp, 1.9, 1.9)
+        if cellUp < 1 { accent.setFill(); NSBezierPath(ovalIn: cellSpot).fill() }
+
         ink.setFill()
         for (i, t) in twin.enumerated() {
             let l = limb[i]
             let cx = ox + t.x, half = t.width / 2
-            let down = lift - pose["sink\(i)"]! * 3.4 + l.head
+            let down = drop(i, l)
 
             // Paws grip the ledge, which cuts them into flat-bottomed mitts, and stay put while the head ducks.
             let paws: [(CGFloat, CGFloat, CGFloat)] = [(-1, l.pawX.0, l.pawY.0), (1, l.pawX.1, l.pawY.1)]
-            for (side, dx, dy) in paws { NSBezierPath(ovalIn: oval(cx + side * t.paw + dx, lift + 0.7 + dy, 1.6, 1.35)).fill() }
+            for (side, dx, dy) in paws { NSBezierPath(ovalIn: oval(cx + side * t.paw + dx, pawLift + 0.7 + dy, 1.6, 1.35)).fill() }
 
             // Head, with the eyes punched out so the menu bar shows through.
             let head = NSBezierPath()
@@ -459,20 +490,15 @@ final class Twins: NSView {
                 head.appendOval(in: oval(cx + side * t.eyeGap + gazeX, t.eyeY + down + gazeY, 1.0, open))
             }
             if l.tilt != 0 {
-                var turn = AffineTransform(translationByX: cx, byY: lift)
+                var turn = AffineTransform(translationByX: cx, byY: 0)
                 turn.rotate(byDegrees: l.tilt)
-                turn.translate(x: -cx, y: -lift)
+                turn.translate(x: -cx, y: 0)
                 head.transform(using: turn)
             }
             head.fill()
         }
 
-        // The one braincell: above a head, between the two, or set down on their joined paws.
-        func rest(_ i: Int) -> CGFloat { twin[i].top - pose["sink\(i)"]! * 3.4 + limb[i].head + 3.1 }
-        let aloft = rest(0) + (rest(1) - rest(0)) * cell + arc
-        let x = ox + twin[0].x + (twin[1].x - twin[0].x) * cell
-        accent.setFill()
-        NSBezierPath(ovalIn: oval(x, aloft + (3.6 - aloft) * perch + lift, 1.9, 1.9)).fill()
+        if cellUp >= 1 { accent.setFill(); NSBezierPath(ovalIn: cellSpot).fill() }
     }
 
     /// Renders a contact sheet of poses on light and dark menu bars, for tuning the look.
@@ -488,7 +514,8 @@ final class Twins: NSView {
             { $0.gesture = [mid(.wait, 0.5), nil]; $0.cellAt = 1 },                        // mine is waiting on me
             { $0.gesture = [mid(.write, 0.29), mid(.write, 0.29)]; $0.cellAt = 0.5 },      // same work: shared
             { $0.cellAt = 0.5; $0.pose["perch"] = 1 },                                     // both waiting: set down
-            { $0.pose["rise"] = 0.55 },                                                    // arriving
+            { $0.pose["up0"] = 0.8; $0.pose["up1"] = 0.25; $0.pose["cellUp"] = 0 },         // arriving: paws, then heads
+            { $0.pose["up0"] = 0.1; $0.pose["up1"] = 0.6; $0.pose["cellUp"] = 0.45 },       // leaving: braincell first
         ]
         let scale: CGFloat = 6, pad: CGFloat = 4, bar: CGFloat = 24
         let cellW = Twins.size.width + pad * 2
@@ -501,12 +528,13 @@ final class Twins: NSView {
             NSRect(x: 0, y: CGFloat(row) * bar * scale, width: CGFloat(w), height: bar * scale).fill()
             for (col, scene) in scenes.enumerated() {
                 let view = Twins()
-                view.pose["rise"] = 1
+                for part in ["paws", "up0", "up1", "cellUp"] { view.pose[part] = 1 }
                 scene(view)
                 NSGraphicsContext.saveGraphicsState()
                 let t = NSAffineTransform()
                 t.translateX(by: CGFloat(col) * cellW * scale, yBy: CGFloat(row) * bar * scale)
                 t.scale(by: scale)
+                t.translateX(by: 0, yBy: bar / 2 - Twins.ledgeBelowCenter)
                 t.concat()
                 NSBezierPath(rect: NSRect(x: 0, y: 0, width: cellW, height: bar)).addClip()
                 view.paint(dark: dark, originX: pad, at: 0)
@@ -519,7 +547,8 @@ final class Twins: NSView {
 
 // MARK: - Menu bar item
 
-/// Owns the status item: absent unless both of us are thinking, with a short doze on the way out.
+/// Owns the status item. It appears when both of us are working, and once it's there whoever
+/// stops just falls asleep; it leaves when someone has slept for `linger`.
 /// Its menu says in a few words what each Claude is doing.
 @MainActor final class MenuBarItem {
     private let item = NSStatusBar.system.statusItem(withLength: Twins.size.width + 4)
@@ -545,8 +574,8 @@ final class Twins: NSView {
         seat()
     }
 
-    /// Puts the twins in the status item's window rather than its button. The button is shorter than
-    /// the menu bar on notched displays; the window always reaches the bar's bottom edge.
+    /// Puts the twins in the status item's window rather than its button: the window is as tall as
+    /// the menu bar on every Mac, which leaves headroom for the braincell's higher throws.
     private func seat() {
         guard let button = item.button else { return }
         let host = button.window?.contentView ?? button
@@ -556,7 +585,8 @@ final class Twins: NSView {
         host.addSubview(twins)
     }
 
-    func update(me: Mind, friend: Mind) {
+    /// stopped: when each of us went quiet (nil while working).
+    func update(me: Mind, friend: Mind, stopped: [Date?]) {
         mine.title = "You: " + me.words
         theirs.title = "Friend: " + friend.words
         item.button?.toolTip = mine.title + "\n" + theirs.title
@@ -575,12 +605,12 @@ final class Twins: NSView {
             twins.setAwake(0, true); twins.setAwake(1, true)
         } else if shown {
             twins.setAwake(0, me.busy); twins.setAwake(1, friend.busy)
-            // If I'm the one who stopped I may be back within the grace period; a friend's stop is already final.
-            let due = Date().addingTimeInterval(friend.busy ? idleGrace : friendDoze)
-            if hideAt == nil || due < hideAt! {
+            // Whoever stopped sleeps where they are, and wakes if their Claude starts again.
+            let due = (stopped.compactMap { $0 }.min() ?? Date()).addingTimeInterval(linger)
+            if hideAt != due {
                 hideAt = due
                 hideTimer?.invalidate()
-                hideTimer = after(due.timeIntervalSinceNow) { [weak self] in self?.hide() }
+                hideTimer = after(max(0.1, due.timeIntervalSinceNow)) { [weak self] in self?.hide() }
             }
         }
     }
@@ -682,7 +712,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
     private var relay: Relay?
     private var watcher: DispatchSourceFileSystemObject?
     private var sessions: [String: Session] = [:]                   // my Claude Code sessions, by id
-    private var friends: [String: (until: Date, mind: Mind)] = [:]  // what each friend last said, and for how long it holds
+    private var friends: [String: (until: Date, since: Date, mind: Mind)] = [:]   // what each friend last said, when, and how long it holds
     private var latest = Mind()                                     // what I was last doing
     private var told = Mind()                                       // what my friend currently believes about me
     private var lastSent = Date.distantPast
@@ -702,7 +732,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
             exit(0)
         }
         relay = Relay(config) { [weak self] id, mind, sent in
-            self?.friends[id] = (mind.busy ? sent.addingTimeInterval(friendLease) : .distantPast, mind)
+            self?.friends[id] = (mind.busy ? sent.addingTimeInterval(friendLease) : .distantPast, sent, mind)
             log("friend \(id): busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-")")
             self?.settle()
         }
@@ -769,9 +799,11 @@ struct Config: Decodable { let server: String, room: String, id: String }
         let live = friends.values.filter { $0.until > now }
         live.forEach { consider($0.until) }
         let friend = live.max { $0.until < $1.until }?.mind ?? Mind()
+        // If they've gone quiet, since when: their last "idle", or the moment a lapsed "busy" ran out.
+        let friendStopped = friends.values.map { $0.mind.busy ? $0.until : $0.since }.max() ?? .distantPast
 
         log("me: \(me.words) [\(me.doing.rawValue)]  friend: \(friend.words) [\(friend.doing.rawValue)]  say=\(say)")
-        item.update(me: me, friend: friend)
+        item.update(me: me, friend: friend, stopped: [me.busy ? nil : idleSince, friend.busy ? nil : friendStopped])
 
         wake?.invalidate()
         wake = next.map { after(max(1, $0.timeIntervalSince(now) + 0.2)) { [weak self] in self?.evaluate() } }

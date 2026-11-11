@@ -1,8 +1,8 @@
 # Braincell
 
-Two little peekers in your Mac's menu bar who share one braincell. They show up only while
-you and a friend are both mid-turn in Claude Code, act out what each of your Claudes is doing,
-and leave when either of you stops.
+Two little peekers in your Mac's menu bar who share one braincell. They show up when you and
+a friend are both mid-turn in Claude Code, act out what each of your Claudes is doing, and nap
+when one of you stops.
 
 ![The twins on light and dark menu bars](twins.png)
 
@@ -50,8 +50,12 @@ The braincell goes to whoever switched tasks most recently, and how it travels d
 work: a quick flat toss between busy hands, a weave while browsing, a high slow lob for planning.
 When you're both doing the same kind of work it hovers between the twins and they move in
 unison. If one Claude is waiting on its human the other twin gets it, and if both are waiting
-it's set down on their joined paws. Whoever stops dozes off, hands it over, and a few seconds
-later both duck out of sight.
+it's set down on their joined paws.
+
+They hop up from nowhere, in line with your other menu bar icons: paws first, then each head,
+then the braincell. Whoever stops falls asleep where they are, hands the braincell over, and
+wakes when their Claude starts again. Once someone has slept for five minutes they all leave the
+way they came: the braincell drops away, the heads duck, and the paws let go last.
 
 Click the twins (or hover) to read what each Claude is doing in a few words, such as "adding
 custom widgets…". The words come from Claude's own to-do list and command descriptions, so they

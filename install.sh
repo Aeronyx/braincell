@@ -55,8 +55,11 @@ EOF
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || { sleep 2; launchctl bootstrap "gui/$(id -u)" "$plist"; }
 
+curl -fsS -m 5 -o /dev/null "$server/v1/health" 2>/dev/null ||
+  echo "Note: $server can't be reached right now. The twins will show up once it can."
+
 echo
 echo "Braincell is running and will start at login."
-echo "Pairing code: $room"
-echo "Your friend installs with:  ./install.sh $room"
-echo "Hooks apply to Claude Code sessions started from now on."
+echo "Pairing code: $room   (your friend adds it after install.sh; treat it like a password)"
+echo "See the twins now: ~/.braincell/Braincell --demo"
+echo "Claude Code sessions that are already open may need a restart to count."

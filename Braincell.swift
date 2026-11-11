@@ -1,23 +1,20 @@
-// Braincell: two little peekers in the menu bar who share one braincell.
-// They show up only while you and a friend are both mid-turn in Claude Code,
-// and act out what each of your Claudes is doing.
+// Braincell: two little peekers in the menu bar who share one braincell. They show up while you
+// and a friend are both mid-turn in Claude Code, and act out what each Claude is doing.
 //
-// Build:  swiftc -O -swift-version 5 Braincell.swift -o Braincell   (install.sh does this)
-// Look:   Braincell --snapshot twins.png                            (renders the poses to a PNG)
+// Build: swiftc -O -swift-version 5 Braincell.swift -o Braincell   (install.sh does this)
+// Try:   Braincell --demo
 
 import AppKit
+import CryptoKit
 
-// MARK: - Tunables
-
-let staleAfter: TimeInterval = 600    // a session log with no heartbeat for this long is dropped
-let idleGrace: TimeInterval = 20      // keep saying "busy" this long after my turn ends, to bridge back-to-back prompts
-let reannounce: TimeInterval = 600    // repeat "busy" this often so my friend's copy can't go stale
-let friendLease: TimeInterval = 1500  // forget a friend's "busy" that hasn't been repeated for this long
-let linger: TimeInterval = 300        // whoever stops sleeps on the ledge this long before the twins leave
-let detailEvery: TimeInterval = 60    // tell my friend what I'm doing at most this often...
-let detailBudget = 120                // ...and at most this many times a day (ntfy.sh allows 250 messages in all)
-let shareWords = true                 // false: my friend sees the kind of work I'm doing, but not the few words about it
-let accent = NSColor(srgbRed: 0.91, green: 0.55, blue: 0.37, alpha: 1)   // light Claude orange
+let staleAfter: TimeInterval = 900    // a session silent for this long has stopped (Esc fires no hook)
+let idleGrace: TimeInterval = 20      // stay "busy" this long after a turn ends, to bridge back-to-back prompts
+let reannounce: TimeInterval = 600    // repeat "busy" this often...
+let friendLease: TimeInterval = 1500  // ...and forget a friend's "busy" once it's this old
+let napFor: TimeInterval = 300        // whoever stops sleeps this long before the twins leave
+let detailEvery: TimeInterval = 60    // say what I'm doing at most this often...
+let detailBudget = 120                // ...and this many times a day (ntfy.sh allows 250 messages a day)
+let accent = NSColor(srgbRed: 0.91, green: 0.55, blue: 0.37, alpha: 1)
 
 let home = ProcessInfo.processInfo.environment["BRAINCELL_HOME"].map { URL(fileURLWithPath: $0) }
     ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".braincell")
@@ -28,7 +25,6 @@ func log(_ s: @autoclosure () -> String) {
     if debug { FileHandle.standardError.write((s() + "\n").data(using: .utf8)!) }
 }
 
-/// A timer on the main run loop whose body runs on the main actor.
 @MainActor @discardableResult
 func after(_ seconds: TimeInterval, repeats: Bool = false, _ body: @escaping @MainActor () -> Void) -> Timer {
     let t = Timer(timeInterval: seconds, repeats: repeats) { _ in MainActor.assumeIsolated(body) }
@@ -39,7 +35,6 @@ func after(_ seconds: TimeInterval, repeats: Bool = false, _ body: @escaping @Ma
 
 // MARK: - What a Claude is up to
 
-/// The kinds of work a twin can act out, worked out from the tool Claude Code is using.
 enum Doing: String {
     case think, read, write, run, web, plan, team, wait
 
@@ -56,7 +51,6 @@ enum Doing: String {
         else { self = .think }
     }
 
-    /// What to say when Claude hasn't described the work itself.
     var phrase: String {
         switch self {
         case .think: return "thinking"
@@ -70,8 +64,7 @@ enum Doing: String {
         }
     }
 
-    /// How long this activity's gesture lasts, in seconds.
-    var beat: Double {
+    var beat: Double {      // how long its gesture lasts
         switch self {
         case .think: return 1.8
         case .read: return 2.2
@@ -85,11 +78,11 @@ enum Doing: String {
     }
 }
 
-/// One of us, as the other sees them.
 struct Mind: Equatable {
     var busy = false
     var doing = Doing.think
-    var label: String?       // a few words from Claude's own to-do list or command description
+    var label: String?      // a few words from Claude's own to-do list or command description
+    var ticked = 0          // to-do items finished this turn
 
     var words: String {
         guard busy else { return "taking a break" }
@@ -97,7 +90,6 @@ struct Mind: Equatable {
     }
 }
 
-/// Shortens a to-do item or command description to about three words:
 /// "Adding custom widgets to the settings page." becomes "adding custom widgets".
 func brief(_ text: String) -> String? {
     let filler: Set<String> = ["a", "an", "the", "to", "of", "in", "on", "for", "and", "with", "from", "into", "at", "by"]
@@ -113,7 +105,7 @@ func brief(_ text: String) -> String? {
     return s.isEmpty ? nil : s
 }
 
-/// The first capture group of a regular expression, for events too long to arrive as whole JSON.
+/// For events too long to arrive as whole JSON.
 func capture(_ pattern: String, in text: String) -> String? {
     guard let re = try? NSRegularExpression(pattern: pattern),
           let m = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)), m.numberOfRanges > 1,
@@ -121,19 +113,20 @@ func capture(_ pattern: String, in text: String) -> String? {
     return String(text[r])
 }
 
-/// What one Claude Code session is doing, pieced together from the lines its hook logs.
+/// One Claude Code session, pieced together from the lines its hook logs.
 struct Session {
-    var born: Date?                 // when the log file was created; each turn starts a new file
+    var born: Date?                 // each turn starts a new log file
     var offset: UInt64 = 0          // how much of it has been read
     var doing = Doing.think
     var task: String?               // the to-do item Claude says it's on
-    var step: String?               // what Claude says the current command or subagent is for
+    var purpose: String?            // what Claude says the current command or subagent is for
+    var ticked = 0
     var plan: [String] = [], at = 0 // desktop app task list: its steps, and the current one
     var tasks: [String] = []        // CLI task list: created in order, then addressed by number
 
     mutating func apply(_ line: String) {
         switch line {
-        case "prompt": doing = .think; task = nil; step = nil
+        case "prompt": doing = .think; task = nil; purpose = nil; ticked = 0
         case "wait": doing = .wait
         case "done": if doing == .wait { doing = .think }
         default:
@@ -142,7 +135,7 @@ struct Session {
             let event = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
             let name = event?["tool_name"] as? String ?? capture(#""tool_name"\s*:\s*"([^"]+)""#, in: json) ?? ""
             let input = event?["tool_input"] as? [String: Any] ?? [:]
-            let key = name.lowercased()
+            let key = name.lowercased(), before = task
             doing = Doing(tool: name)
 
             if key == "todowrite" {
@@ -161,43 +154,44 @@ struct Session {
             } else if key == "taskcreate" {
                 tasks.append((input["activeForm"] ?? input["subject"]) as? String ?? "")
             } else if key == "taskupdate" {
-                let number = Int("\(input["taskId"] ?? "")") ?? 0
-                if input["status"] as? String == "in_progress", tasks.indices.contains(number - 1) { task = tasks[number - 1] }
+                let number = (Int("\(input["taskId"] ?? "")") ?? 0) - 1
+                if tasks.indices.contains(number) {
+                    let status = input["status"] as? String
+                    if status == "in_progress" { task = tasks[number] } else if status == "completed", task == tasks[number] { task = nil }
+                }
             } else if doing == .run || doing == .team {
-                step = input["description"] as? String ?? capture(#""description"\s*:\s*"((?:[^"\\]|\\.)*)""#, in: json)
+                purpose = input["description"] as? String ?? capture(#""description"\s*:\s*"((?:[^"\\]|\\.)*)""#, in: json)
             } else {
-                step = nil
+                purpose = nil
             }
+            if let before, task != before { ticked += 1 }
         }
     }
 
-    var mind: Mind {
-        let said = [task, step].compactMap { $0 }.first.flatMap(brief)
-        return Mind(busy: true, doing: doing, label: said)
-    }
+    var mind: Mind { Mind(busy: true, doing: doing, label: (task ?? purpose).flatMap(brief), ticked: ticked) }
 }
 
 // MARK: - The twins
 
 /// Draws the two peekers and their braincell. Coordinates are points, with y = 0 on the ledge they
-/// peek over: the menu bar's bottom edge, or an invisible line level with the bottoms of the other
-/// icons. Anything below it is out of sight. Movement comes in short bursts; between them nothing is redrawn and
-/// no timer runs.
+/// peek over; anything below it is out of sight. Movement comes in short bursts, and between
+/// them nothing is redrawn and no timer runs.
 final class Twins: NSView {
     static let size = NSSize(width: 34, height: 18)
-    static let ledgeBelowCenter: CGFloat = 8     // when centered, how far under the menu bar's midline the ledge sits
+    static let ledgeBelowCenter: CGFloat = 8    // centered: how far under the menu bar's midline the ledge sits
+    private static let doze: CGFloat = 3.4      // how far a sleeping head sinks
 
     private struct Twin { let x, width, top, eyeGap, eyeY, paw: CGFloat }
     private let twin = [
-        Twin(x: 8.95, width: 10.0, top: 8.7, eyeGap: 2.15, eyeY: 4.5, paw: 6.95),   // me
-        Twin(x: 25.35, width: 9.4, top: 9.9, eyeGap: 2.0, eyeY: 5.4, paw: 6.65),    // my friend (inner paws touch)
+        Twin(x: 8.95, width: 10.0, top: 8.7, eyeGap: 2.15, eyeY: 4.5, paw: 6.95),   // me: solid
+        Twin(x: 25.35, width: 9.4, top: 9.9, eyeGap: 2.0, eyeY: 5.4, paw: 6.65),    // my friend: outlined
     ]
 
-    // Slow poses, tweened. paws, up0, up1, cellUp: 0 = hidden below the ledge, 1 = in place.
-    // sink: 1 = dozing low. lid: 1 = eyes shut. perch: 1 = the braincell is set down on their joined paws.
-    // center: 0 = the ledge is the menu bar's bottom edge, 1 = it's level with the other icons.
-    private var pose: [String: CGFloat] = ["paws": 0, "up0": 0, "up1": 0, "cellUp": 0,
-                                           "sink0": 0, "sink1": 0, "lid0": 0, "lid1": 0, "perch": 0, "center": 0]
+    // Tweened poses. paws, up0, up1, cellUp: 0 = below the ledge, 1 = in place. sink: 1 = dozing low.
+    // lid: 1 = eyes shut. perch: 1 = the braincell rests on their paws. center: 1 = level with the
+    // other icons. zs: how visible the sleepers' z's are.
+    private var pose: [String: CGFloat] = ["paws": 0, "up0": 0, "up1": 0, "cellUp": 0, "sink0": 0, "sink1": 0,
+                                           "lid0": 0, "lid1": 0, "perch": 0, "center": 0, "zs": 1]
     private enum Ease { case smooth, spring, windUp }    // spring overshoots at the end; windUp pulls back first
     private struct Tween { let start: CFTimeInterval, length: Double, from, to: CGFloat, ease: Ease, then: (() -> Void)? }
     private var tweens: [String: Tween] = [:]
@@ -205,48 +199,49 @@ final class Twins: NSView {
     private var awake = [true, true]
     private var doing: [Doing] = [.think, .think]
 
-    // The braincell. cellAt: 0 = over my twin, 1 = over my friend's, 0.5 = shared between them.
+    // The braincell. cellAt: 0 = over my twin, 1 = over my friend's, 0.5 = shared.
     private struct Hop { let from, to: CGFloat, start: CFTimeInterval, length: Double, height, wobble: CGFloat, hard: Bool }
     private var cellAt: CGFloat = 0
     private var hop: Hop?
-    private var holder = 0                      // who gets it when nothing else decides: whoever switched tasks last
+    private var holder = 0      // who has it when nothing else decides: whoever switched tasks last
     private var lastHop: CFTimeInterval = 0
     private var nextPass: CFTimeInterval = 0
 
     // A gesture is one short burst of movement by one twin.
-    private enum Move { case act(Doing), catchIt, bump }
+    private enum Move { case act(Doing), catchIt, bump, greet, cheer }
     private struct Gesture { let move: Move, start: CFTimeInterval, length: Double; var cut: CFTimeInterval? }
     private var gesture: [Gesture?] = [nil, nil]
-    private var queued: [(move: Move, length: Double)?] = [nil, nil]   // waits for the current gesture to finish
-    private var settled: [CFTimeInterval] = [0, 0]                     // no gesture starts before this: a twin that just arrived or woke takes a moment
+    private var queued: [(move: Move, length: Double)?] = [nil, nil]
+    private var settled: [CFTimeInterval] = [0, 0]      // a twin that just arrived or woke takes a moment before its next gesture
+    private var zs: [(x: CGFloat, y: CGFloat, side: CGFloat, start: CFTimeInterval)] = []
+    private var nextZ: [CFTimeInterval] = [0, 0]
 
     private var frames: Timer?
     private var life: Timer?
-    weak var button: NSView?    // the status item button: it knows whether the menu bar is light or dark
+    weak var button: NSView?    // the status item's button knows whether the menu bar is light or dark
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }   // clicks belong to the status item
     override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
 
     // MARK: Poses
 
-    /// Moves the ledge between the menu bar's bottom edge and the line the other icons sit on.
     func setCentered(_ on: Bool, animated: Bool) {
         if animated { move("center", to: on ? 1 : 0, over: 0.5) } else { pose["center"] = on ? 1 : 0; needsDisplay = true }
     }
 
-    /// Up from nowhere: paws grab the ledge, the heads hop up one after the other, and the
-    /// braincell pops out from behind whoever holds it. Then they bump paws.
+    /// Up from nowhere: paws, then each head, then the braincell, then a paw bump.
     func arrive() {
         let center = tweens["center"]
         tweens.removeAll(); tweens["center"] = center
-        hop = nil; gesture = [nil, nil]; queued = [nil, nil]
+        hop = nil; gesture = [nil, nil]; queued = [nil, nil]; zs = []
+        pose["zs"] = 1
         settled = [CACurrentMediaTime() + 1.2, CACurrentMediaTime() + 1.2]
         awake = [true, true]
         for who in 0..<2 {
-            if pose["up\(who)"]! == 0 { pose["sink\(who)"] = 0; pose["lid\(who)"] = 0 }             // out of sight: just reset
-            else { move("lid\(who)", to: 0, over: 0.25); move("sink\(who)", to: 0, over: 0.5, .spring) }   // caught mid-exit: wake up smoothly
+            if pose["up\(who)"]! == 0 { pose["sink\(who)"] = 0; pose["lid\(who)"] = 0 }
+            else { move("lid\(who)", to: 0, over: 0.25); move("sink\(who)", to: 0, over: 0.5, .spring) }   // caught mid-exit
         }
-        if pose["cellUp"]! == 0 {      // only choose a new spot for the braincell while nobody can see it
+        if pose["cellUp"]! == 0 {      // only pick a new spot for the braincell while nobody can see it
             holder = Bool.random() ? 0 : 1
             let spot = cellSpot()
             cellAt = spot.at; pose["perch"] = spot.perched ? 1 : 0
@@ -262,12 +257,12 @@ final class Twins: NSView {
         scheduleLife()
     }
 
-    /// Back to nowhere: the braincell drops out of sight, each head winds up and ducks, and the
-    /// paws let go last. Only then is the status item itself taken away.
+    /// Back to nowhere: the braincell drops away, the heads duck, and the paws let go last.
     func leave(then done: @escaping () -> Void) {
         life?.invalidate(); life = nil
         calm(0); calm(1)
         if let h = hop { cellAt = h.to; hop = nil }
+        move("zs", to: 0, over: 0.3)
         move("cellUp", to: 0, over: 0.35)
         move("up0", to: 0, over: 0.45, .windUp, delay: 0.25)
         move("up1", to: 0, over: 0.45, .windUp, delay: 0.37)
@@ -277,14 +272,22 @@ final class Twins: NSView {
     func setAwake(_ who: Int, _ on: Bool) {
         guard awake[who] != on else { return }
         awake[who] = on
+        let lid = "lid\(who)", sink = "sink\(who)"
         if on {
-            settled[who] = CACurrentMediaTime() + 0.9     // open its eyes and straighten up before doing anything
-            move("lid\(who)", to: 0, over: 0.25)
-            move("sink\(who)", to: 0, over: 0.5, .spring)
+            settled[who] = CACurrentMediaTime() + 0.9
+            move(lid, to: 0, over: 0.25)
+            move(sink, to: 0, over: 0.5, .spring)
+            if life != nil, awake[1 - who] { interrupt(1 - who, with: .greet, for: 0.9) }
         } else {
             calm(who)
-            move("lid\(who)", to: 1, over: 0.3)
-            move("sink\(who)", to: 1, over: 0.7)
+            move(lid, to: 0.8, over: 0.45)                              // nods off...
+            move(sink, to: 0.5, over: 0.5) { [weak self] in
+                self?.move(lid, to: 0.35, over: 0.15)                   // ...catches itself...
+                self?.move(sink, to: 0.1, over: 0.25, .spring) { [weak self] in
+                    self?.move(lid, to: 1, over: 0.45)                  // ...and is gone
+                    self?.move(sink, to: 1, over: 0.8) { [weak self] in self?.snooze(who) }
+                }
+            }
         }
         placeCell()     // the one still thinking gets the braincell
     }
@@ -296,6 +299,10 @@ final class Twins: NSView {
         guard life != nil, awake[who] else { return }
         start(.act(what), on: who, for: what.beat)
         placeCell()
+    }
+
+    func cheer(_ who: Int) {
+        if life != nil, awake[who] { interrupt(who, with: .cheer, for: 1.0) }
     }
 
     // MARK: A little life
@@ -314,12 +321,21 @@ final class Twins: NSView {
             for who in up where gesture[who] == nil && Bool.random() { start(.act(doing[who]), on: who, for: doing[who].beat) }
         }
         if let who = up.randomElement(), gesture[who] == nil { blink(who) }
+        for who in 0..<2 where !awake[who] && pose["sink\(who)"]! == 1 && CACurrentMediaTime() > nextZ[who] { snooze(who) }
         if up.count == 2, CACurrentMediaTime() > nextPass {
             holder = 1 - holder
             nextPass = CACurrentMediaTime() + .random(in: 18...40)
         }
         placeCell()
         scheduleLife()
+    }
+
+    /// A little z drifts up and away from a sleeper.
+    private func snooze(_ who: Int) {
+        let side: CGFloat = who == 0 ? -1 : 1
+        zs.append((twin[who].x + side * 4.2, twin[who].top - Twins.doze + 1.8, side, CACurrentMediaTime()))
+        nextZ[who] = CACurrentMediaTime() + .random(in: 5...9)
+        run()
     }
 
     private func blink(_ who: Int) {
@@ -341,9 +357,13 @@ final class Twins: NSView {
         if gesture[who] != nil, gesture[who]!.cut == nil { gesture[who]!.cut = CACurrentMediaTime() }
     }
 
+    private func interrupt(_ who: Int, with move: Move, for length: Double) {
+        calm(who)
+        start(move, on: who, for: length)
+    }
+
     // MARK: The braincell
 
-    /// Where the braincell belongs, given what the two of them are doing.
     private func cellSpot() -> (at: CGFloat, perched: Bool) {
         if awake[0] != awake[1] { return (awake[0] ? 0 : 1, false) }        // whoever is still thinking keeps it
         if !awake[0] { return (cellAt, false) }                             // both dozing: leave it be
@@ -354,16 +374,16 @@ final class Twins: NSView {
         return (CGFloat(holder), false)
     }
 
-    /// Sends the braincell to where it belongs. How it travels depends on what they're up to.
+    /// Sends the braincell where it belongs. How it travels depends on what they're up to.
     private func placeCell() {
         let now = CACurrentMediaTime(), spot = cellSpot()
         if (pose["perch"]! > 0.5) != spot.perched { move("perch", to: spot.perched ? 1 : 0, over: 0.7) }
         guard hop == nil, tweens["cellUp"] == nil, spot.at != cellAt, now - lastHop > 2.5 else { return }   // the life timer tries again
         let pair = [doing[0], doing[1]]
-        var style = (length: 0.8, height: CGFloat(1.8), wobble: CGFloat(0), hard: false)                       // an easy lob
-        if pair.contains(.run) || pair.contains(.write) { style = (0.38, 0.7, 0, true) }                      // busy hands: a quick flat toss
-        else if pair.contains(.web) { style = (1.1, 1.4, 0.9, false) }                                        // surfing: it weaves across
-        else if pair.contains(.plan) || pair.contains(.team) { style = (1.3, 3.0, 0, false) }                 // big ideas: a high, slow lob
+        var style = (length: 0.8, height: CGFloat(1.8), wobble: CGFloat(0), hard: false)        // an easy lob
+        if pair.contains(.run) || pair.contains(.write) { style = (0.38, 0.7, 0, true) }       // busy hands: a quick flat toss
+        else if pair.contains(.web) { style = (1.1, 1.4, 0.9, false) }                         // surfing: it weaves across
+        else if pair.contains(.plan) || pair.contains(.team) { style = (1.3, 3.0, 0, false) }  // big ideas: a high, slow lob
         hop = Hop(from: cellAt, to: spot.at, start: now, length: style.length, height: style.height, wobble: style.wobble, hard: style.hard)
         run()
     }
@@ -381,7 +401,7 @@ final class Twins: NSView {
 
     private func step() {
         let now = CACurrentMediaTime()
-        for (key, t) in tweens {
+        for (key, t) in tweens where tweens[key]?.start == t.start {     // skips any replaced earlier in this pass
             let p = max(0, min(1, (now - t.start) / t.length))
             let eased: Double
             switch t.ease {
@@ -389,19 +409,20 @@ final class Twins: NSView {
             case .spring: eased = 1 + 2.7 * pow(p - 1, 3) + 1.7 * pow(p - 1, 2)
             case .windUp: eased = 2.7 * p * p * p - 1.7 * p * p
             }
-            pose[key] = t.from + (t.to - t.from) * CGFloat(eased)
+            pose[key] = p >= 1 ? t.to : t.from + (t.to - t.from) * CGFloat(eased)
             if p >= 1 { tweens[key] = nil; t.then?() }
         }
         if let h = hop, now - h.start >= h.length {
             cellAt = h.to; hop = nil; lastHop = now
-            if h.hard, h.to != 0.5, awake[Int(h.to)], gesture[Int(h.to)] == nil { start(.catchIt, on: Int(h.to), for: 0.3) }   // caught it
+            if h.hard, h.to != 0.5, awake[Int(h.to)], gesture[Int(h.to)] == nil { start(.catchIt, on: Int(h.to), for: 0.3) }
         }
         for who in 0..<2 {
             guard let g = gesture[who], now - g.start >= g.length || g.cut.map({ now - $0 >= 0.25 }) == true else { continue }
             gesture[who] = nil
             if let next = queued[who] { queued[who] = nil; start(next.move, on: who, for: next.length) }
         }
-        if tweens.isEmpty && hop == nil && gesture[0] == nil && gesture[1] == nil { frames?.invalidate(); frames = nil }
+        zs.removeAll { now - $0.start >= 2.4 }
+        if tweens.isEmpty && hop == nil && gesture[0] == nil && gesture[1] == nil && zs.isEmpty { frames?.invalidate(); frames = nil }
         needsDisplay = true
     }
 
@@ -412,7 +433,6 @@ final class Twins: NSView {
         var pawX: (CGFloat, CGFloat) = (0, 0), pawY: (CGFloat, CGFloat) = (0, 0)
     }
 
-    /// How far a twin's eyes, head and paws are from rest at this instant of its gesture.
     private func limbs(_ who: Int, at now: CFTimeInterval) -> Limbs {
         var l = Limbs()
         guard let g = gesture[who] else { return l }
@@ -445,6 +465,10 @@ final class Twins: NSView {
             l.head = -0.8 * sin(.pi * p) * fade
         case .bump:             // the paws they hold bump once
             if who == 0 { l.pawY.1 = 1.6 * sin(.pi * p) * fade } else { l.pawY.0 = 1.6 * sin(.pi * p) * fade }
+        case .greet:            // the other one just woke up: a glance over and a little hop
+            l.gazeX = (who == 0 ? 0.9 : -0.9) * ease; l.head = 0.9 * sin(.pi * min(1, p * 2)) * fade
+        case .cheer:            // a to-do item is done: paws up, two hops
+            l.pawY = (2.8 * ease, 2.8 * ease); l.head = 1.1 * abs(wave(1)) * ease; l.gazeY = 0.35 * ease
         }
         return l
     }
@@ -453,8 +477,7 @@ final class Twins: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let dark = (button ?? self).effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        // The ledge: the bottom of the status item's window (the menu bar's real bottom edge), or an
-        // invisible line level with the other icons. Everything below it is clipped away.
+        // The ledge: the menu bar's bottom edge, or a line level with the other icons. Below it is clipped away.
         let shift = NSAffineTransform()
         shift.translateX(by: 0, yBy: (bounds.midY - Twins.ledgeBelowCenter) * pose["center"]!)
         shift.concat()
@@ -462,19 +485,16 @@ final class Twins: NSView {
         paint(dark: dark, originX: (bounds.width - Twins.size.width) / 2, at: CACurrentMediaTime())
     }
 
-    /// backdrop: what is behind the twins when that isn't the live menu bar (only the snapshot needs it).
-    private func paint(dark: Bool, originX ox: CGFloat, at now: CFTimeInterval, backdrop: NSColor? = nil) {
+    private func paint(dark: Bool, originX ox: CGFloat, at now: CFTimeInterval) {
         let ink = dark ? NSColor(white: 1, alpha: 0.92) : NSColor(white: 0, alpha: 0.85)
         let perch = pose["perch"]!, cellUp = pose["cellUp"]!
         let pawLift = (pose["paws"]! - 1) * 4
-        // How far each head is from its resting height: hidden below the ledge, dozing low, or mid-gesture.
-        func drop(_ i: Int, _ l: Limbs) -> CGFloat { (pose["up\(i)"]! - 1) * (twin[i].top + 2.5) - pose["sink\(i)"]! * 3.4 + l.head }
+        func drop(_ i: Int, _ l: Limbs) -> CGFloat { (pose["up\(i)"]! - 1) * (twin[i].top + 2.5) - pose["sink\(i)"]! * Twins.doze + l.head }
         func oval(_ cx: CGFloat, _ cy: CGFloat, _ rx: CGFloat, _ ry: CGFloat) -> NSRect {
             NSRect(x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2)
         }
 
-        // Where the braincell is on its way across.
-        var cell = cellAt, arc: CGFloat = 0
+        var cell = cellAt, arc: CGFloat = 0     // where the braincell is on its way across
         if let h = hop {
             let u = CGFloat(min(1, max(0, (now - h.start) / h.length)))
             cell = h.from + (h.to - h.from) * (u * u * (3 - 2 * u))
@@ -482,8 +502,7 @@ final class Twins: NSView {
         }
         let limb = [limbs(0, at: now), limbs(1, at: now)]
 
-        // The one braincell: above a head, between the two, or set down on their joined paws.
-        // While it's coming or going it passes behind the heads, as if popping out of one.
+        // While the braincell is coming or going it passes behind the heads, as if popping out of one.
         func rest(_ i: Int) -> CGFloat { twin[i].top + drop(i, limb[i]) + 3.1 }
         let aloft = rest(0) + (rest(1) - rest(0)) * cell + arc
         let cellSpot = oval(ox + twin[0].x + (twin[1].x - twin[0].x) * cell, -3 + (aloft + (3.6 - aloft) * perch + 3) * cellUp, 1.9, 1.9)
@@ -495,12 +514,11 @@ final class Twins: NSView {
             let cx = ox + t.x, half = t.width / 2
             let down = drop(i, l)
 
-            // Paws grip the ledge, which cuts them into flat-bottomed mitts, and stay put while the head ducks.
+            // The ledge cuts the paws into flat-bottomed mitts.
             let paws: [(CGFloat, CGFloat, CGFloat)] = [(-1, l.pawX.0, l.pawY.0), (1, l.pawX.1, l.pawY.1)]
             for (side, dx, dy) in paws { NSBezierPath(ovalIn: oval(cx + side * t.paw + dx, pawLift + 0.7 + dy, 1.6, 1.35)).fill() }
 
-            // Mine is solid with the eyes punched out so the menu bar shows through. My friend's is
-            // hollow: an outline with solid eyes. That's how you tell whose is whose.
+            // Mine is solid with the eyes punched out. My friend's is an outline with solid eyes.
             let hollow = i == 1
             let edge: CGFloat = hollow ? 0.55 : 0          // keeps the outline inside the same silhouette
             let wide = half - edge, top = t.top + down - edge, shoulder = top - wide * 0.95
@@ -516,8 +534,7 @@ final class Twins: NSView {
             head.line(to: NSPoint(x: cx + wide, y: -12))
             head.close()
 
-            // Eyes drift toward the braincell once it's out (the holder glances up, the other looks
-            // across), plus the gesture. The hollow twin's eyes stay clear of its outline.
+            // Eyes drift toward the braincell: the holder glances up, the other looks across.
             let holds = i == 0 ? 1 - cell : cell, watching = max(0, min(1, cellUp))
             let reach: CGFloat = hollow ? 0.55 : 1.2
             let gazeX = max(-reach, min(reach, (i == 0 ? 0.55 : -0.55) * (1 - holds) * watching + l.gazeX))
@@ -531,14 +548,11 @@ final class Twins: NSView {
                 turn.translate(x: -cx, y: 0)
                 head.transform(using: turn); eyes.transform(using: turn)
             }
+            if cellUp < 1 {     // the braincell is passing behind: don't let it show through
+                NSGraphicsContext.current?.cgContext.setBlendMode(.clear); head.fill()
+                NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+            }
             if hollow {
-                if cellUp < 1 {     // the braincell is passing behind: don't let it show through the hollow body
-                    if let backdrop { backdrop.setFill(); head.fill(); ink.setFill() }
-                    else {
-                        NSGraphicsContext.current?.cgContext.setBlendMode(.clear); head.fill()
-                        NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
-                    }
-                }
                 ink.setStroke()
                 head.lineWidth = 1.1
                 head.stroke()
@@ -551,103 +565,95 @@ final class Twins: NSView {
         }
 
         if cellUp >= 1 { accent.setFill(); NSBezierPath(ovalIn: cellSpot).fill() }
-    }
 
-    /// Renders a contact sheet of poses on light and dark menu bars, for tuning the look.
-    static func snapshot(to path: String) {
-        func mid(_ what: Doing, _ p: Double) -> Gesture { Gesture(move: .act(what), start: -p, length: 1, cut: nil) }
-        let scenes: [(Twins) -> Void] = [
-            { _ in },                                                                      // both thinking
-            { $0.hop = Hop(from: 0, to: 1, start: -0.5, length: 1, height: 1.8, wobble: 0, hard: false) },   // passing it over
-            { $0.cellAt = 1; $0.pose["lid0"] = 1; $0.pose["sink0"] = 1 },                  // I've stopped
-            { $0.gesture = [mid(.read, 0.55), mid(.write, 0.29)] },                        // reading, typing
-            { $0.gesture = [mid(.run, 0.5), mid(.web, 0.12)]; $0.cellAt = 1 },             // running, browsing
-            { $0.gesture = [mid(.plan, 0.25), mid(.team, 0.5)] },                          // planning, orchestrating
-            { $0.gesture = [mid(.wait, 0.5), nil]; $0.cellAt = 1 },                        // mine is waiting on me
-            { $0.gesture = [mid(.write, 0.29), mid(.write, 0.29)]; $0.cellAt = 0.5 },      // same work: shared
-            { $0.cellAt = 0.5; $0.pose["perch"] = 1 },                                     // both waiting: set down
-            { $0.pose["up0"] = 0.8; $0.pose["up1"] = 0.25; $0.pose["cellUp"] = 0 },         // arriving: paws, then heads
-            { $0.pose["up0"] = 0.1; $0.pose["up1"] = 0.6; $0.pose["cellUp"] = 0.45 },       // leaving: braincell first
-        ]
-        let scale: CGFloat = 6, pad: CGFloat = 4, bar: CGFloat = 24
-        let cellW = Twins.size.width + pad * 2
-        let w = Int(cellW * CGFloat(scenes.count) * scale), h = Int(bar * 2 * scale)
-        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
-                                   hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-        for (row, dark) in [true, false].enumerated() {
-            let backdrop = dark ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.91, alpha: 1)
-            backdrop.setFill()
-            NSRect(x: 0, y: CGFloat(row) * bar * scale, width: CGFloat(w), height: bar * scale).fill()
-            for (col, scene) in scenes.enumerated() {
-                let view = Twins()
-                for part in ["paws", "up0", "up1", "cellUp"] { view.pose[part] = 1 }
-                scene(view)
-                NSGraphicsContext.saveGraphicsState()
-                let t = NSAffineTransform()
-                t.translateX(by: CGFloat(col) * cellW * scale, yBy: CGFloat(row) * bar * scale)
-                t.scale(by: scale)
-                t.concat()
-                NSBezierPath(rect: NSRect(x: 0, y: 0, width: cellW, height: bar)).addClip()
-                view.paint(dark: dark, originX: pad, at: 0, backdrop: backdrop)
-                NSGraphicsContext.restoreGraphicsState()
-            }
+        for z in zs {
+            let p = CGFloat((now - z.start) / 2.4)
+            guard p > 0, p < 1 else { continue }
+            let half = 1.0 + 0.6 * p
+            let x = ox + z.x + z.side * 1.4 * p + sin(p * 2 * .pi) * 0.4, y = z.y + 5 * p
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: x - half, y: y + half)); path.line(to: NSPoint(x: x + half, y: y + half))
+            path.line(to: NSPoint(x: x - half, y: y - half)); path.line(to: NSPoint(x: x + half, y: y - half))
+            path.lineWidth = 0.7; path.lineCapStyle = .round; path.lineJoinStyle = .round
+            ink.withAlphaComponent(ink.alphaComponent * min(1, p * 4) * (1 - p) * pose["zs"]!).setStroke()
+            path.stroke()
         }
-        try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
     }
 }
 
 // MARK: - Menu bar item
 
-/// Owns the status item. It appears when both of us are working, and once it's there whoever
-/// stops just falls asleep; it leaves when someone has slept for `linger`.
-/// Its menu says in a few words what each Claude is doing.
-@MainActor final class MenuBarItem {
+/// Owns the status item. It appears when both of us are working. Once it's there, whoever stops
+/// just falls asleep, and it leaves when someone has slept for `nap`.
+@MainActor final class MenuBarItem: NSObject, NSMenuDelegate {
+    var nap = napFor
     private let item = NSStatusBar.system.statusItem(withLength: Twins.size.width + 4)
     private let twins = Twins()
-    private let mine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let theirs = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let mine = NSMenuItem(), theirs = NSMenuItem(), tally = NSMenuItem()
     private var shown = false
     private var hideAt: Date?
     private var hideTimer: Timer?
     private var inkWatch: NSKeyValueObservation?
+    private var ticked = [0, 0]
+    private var together: TimeInterval = 0, bothSince: Date?, day = Date()   // how long we've both been working today
 
     init(extras: [NSMenuItem]) {
+        super.init()
         let menu = NSMenu()
         menu.autoenablesItems = false
-        mine.isEnabled = false; theirs.isEnabled = false
-        for entry in [mine, theirs, .separator()] + extras { menu.addItem(entry) }
+        menu.delegate = self
+        for line in [mine, theirs, tally] { line.isEnabled = false; menu.addItem(line) }
+        if !extras.isEmpty { menu.addItem(.separator()) }
+        extras.forEach { menu.addItem($0) }
         item.isVisible = false
         item.menu = menu
         twins.button = item.button
+        twins.autoresizingMask = [.width, .height]
         inkWatch = item.button?.observe(\.effectiveAppearance) { [twins] _, _ in
             MainActor.assumeIsolated { twins.needsDisplay = true }
         }
         seat()
     }
 
-    /// Puts the twins in the status item's window rather than its button: the window is as tall as
-    /// the menu bar on every Mac, which leaves headroom for the braincell's higher throws.
+    /// The twins live in the status item's window rather than its button: the window is as tall as
+    /// the menu bar on every Mac, so they can sit on its bottom edge with headroom above.
     private func seat() {
         guard let button = item.button else { return }
-        let host = button.window?.contentView ?? button
-        guard twins.superview !== host else { return }
-        twins.frame = host.bounds
-        twins.autoresizingMask = [.width, .height]
-        host.addSubview(twins)
+        var host: NSView = button
+        if let content = button.window?.contentView, content.bounds.height < 64, content.bounds.width < button.bounds.width + 64 {
+            host = content      // only while that window is what it is today: one menu bar slot
+        }
+        let slot = button.convert(button.bounds, to: host)
+        let frame = NSRect(x: slot.minX, y: 0, width: slot.width, height: host.bounds.height)
+        if twins.superview !== host { host.addSubview(twins) }
+        if twins.frame != frame { twins.frame = frame }
     }
 
     func setCentered(_ on: Bool, animated: Bool) { twins.setCentered(on, animated: animated) }
 
+    func menuWillOpen(_ menu: NSMenu) {
+        let minutes = Int((together + (bothSince.map { Date().timeIntervalSince($0) } ?? 0)) / 60)
+        let time = minutes < 1 ? "under a minute" : (minutes < 60 ? "" : "\(minutes / 60)h ") + "\(minutes % 60)m"
+        tally.title = "Together: \(time) today"
+    }
+
     /// stopped: when each of us went quiet (nil while working).
     func update(me: Mind, friend: Mind, stopped: [Date?]) {
+        let now = Date(), both = me.busy && friend.busy
         mine.title = "You: " + me.words
         theirs.title = "Friend: " + friend.words
         item.button?.toolTip = mine.title + "\n" + theirs.title
+        if !Calendar.current.isDate(now, inSameDayAs: day) { day = now; together = 0; bothSince = bothSince.map { _ in now } }
+        if both { bothSince = bothSince ?? now } else if let since = bothSince { together += now.timeIntervalSince(since); bothSince = nil }
+
+        seat()
         if me.busy { twins.setDoing(0, me.doing) }
         if friend.busy { twins.setDoing(1, friend.doing) }
+        let ticks = [me.busy ? me.ticked : 0, friend.busy ? friend.ticked : 0]
+        for who in 0..<2 where shown && ticks[who] > ticked[who] { twins.cheer(who) }
+        ticked = ticks
 
-        if me.busy && friend.busy {
+        if both {
             hideTimer?.invalidate(); hideTimer = nil; hideAt = nil
             if !shown {
                 shown = true
@@ -659,8 +665,7 @@ final class Twins: NSView {
             twins.setAwake(0, true); twins.setAwake(1, true)
         } else if shown {
             twins.setAwake(0, me.busy); twins.setAwake(1, friend.busy)
-            // Whoever stopped sleeps where they are, and wakes if their Claude starts again.
-            let due = (stopped.compactMap { $0 }.min() ?? Date()).addingTimeInterval(linger)
+            let due = (stopped.compactMap { $0 }.min() ?? now).addingTimeInterval(nap)
             if hideAt != due {
                 hideAt = due
                 hideTimer?.invalidate()
@@ -679,20 +684,52 @@ final class Twins: NSView {
     }
 }
 
+/// `Braincell --demo` acts out a short script, so you can see the twins without a friend.
+@MainActor func demo() {
+    let item = MenuBarItem(extras: [])
+    item.nap = 8
+    func m(_ doing: Doing, _ label: String? = nil, ticked: Int = 0) -> Mind { Mind(busy: true, doing: doing, label: label, ticked: ticked) }
+    let script: [(at: Double, me: Mind, friend: Mind)] = [
+        (0.5, m(.think), m(.think)),
+        (4, m(.write, "adding custom widgets"), m(.read, "tracing the login bug")),
+        (9, m(.run, "running the tests"), m(.web, "reading the docs")),
+        (14, m(.write, "fixing the layout"), m(.write, "patching the login")),
+        (20, m(.plan, "polishing the menu", ticked: 1), m(.team, "reviewing with agents")),
+        (25, m(.wait), m(.write, "patching the login")),
+        (29, m(.think), Mind()),
+        (35, m(.think), m(.think)),
+        (39, Mind(), m(.write, "patching the login")),
+        (43, Mind(), Mind()),
+    ]
+    for act in script {
+        after(act.at) { item.update(me: act.me, friend: act.friend, stopped: [act.me.busy ? nil : Date(), act.friend.busy ? nil : Date()]) }
+    }
+    after(script.last!.at + item.nap + 2) { exit(0) }
+}
+
 // MARK: - Relay (one ntfy topic shared by the two of us)
 
 struct Config: Decodable { let server: String, room: String, id: String }
 
 @MainActor final class Relay {
-    private let topic: URL
-    private let me: String
+    private let topic: URL, key: SymmetricKey, me: String
     private let onFriend: (_ id: String, _ mind: Mind, _ sent: Date) -> Void
     private let session: URLSession
     private var stream: Task<Void, Never>?
+    private var posting: URLSessionDataTask?
     private var lastMessage: String?
+    private var skew: TimeInterval = 0      // this Mac's clock minus the relay's, so a wrong clock can't expire a friend early
 
     init(_ config: Config, onFriend: @escaping (String, Mind, Date) -> Void) {
-        topic = URL(string: config.server)!.appendingPathComponent("braincell-" + config.room)
+        // The pairing code never leaves this Mac. The topic's name and the key that seals every
+        // message are both derived from it, so the relay sees neither the code nor anything readable.
+        let code = SymmetricKey(data: Data(config.room.utf8))
+        func derive(_ purpose: String, bytes: Int) -> SymmetricKey {
+            HKDF<SHA256>.deriveKey(inputKeyMaterial: code, info: Data(purpose.utf8), outputByteCount: bytes)
+        }
+        key = derive("braincell key", bytes: 32)
+        let name = derive("braincell topic", bytes: 16).withUnsafeBytes { $0.map { String(format: "%02x", $0) }.joined() }
+        topic = URL(string: config.server)!.appendingPathComponent("braincell-" + name)
         me = config.id
         self.onFriend = onFriend
         let c = URLSessionConfiguration.ephemeral
@@ -700,22 +737,29 @@ struct Config: Decodable { let server: String, room: String, id: String }
         session = URLSession(configuration: c)
     }
 
-    /// Everything that ever leaves this Mac: busy or not, the kind of work, and a few words about it.
-    func send(_ mind: Mind) {
-        var body: [String: Any] = ["id": me, "busy": mind.busy]
-        if mind.busy { body["doing"] = mind.doing.rawValue }
-        if mind.busy, shareWords, let label = mind.label { body["label"] = label }
+    /// Everything that ever leaves this Mac: this one line, sealed so only the two of us can read it.
+    func send(_ mind: Mind, then done: @escaping @MainActor @Sendable (Bool) -> Void = { _ in }) {
+        var line: [String: Any] = ["id": me, "busy": mind.busy]
+        if mind.busy { line["doing"] = mind.doing.rawValue; line["ticked"] = mind.ticked }
+        if mind.busy, let label = mind.label { line["label"] = label }
+        guard let plain = try? JSONSerialization.data(withJSONObject: line),
+              let sealed = try? ChaChaPoly.seal(plain, using: key).combined else { return }
         var r = URLRequest(url: topic)
         r.httpMethod = "POST"
-        r.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        r.httpBody = Data(sealed.base64EncodedString().utf8)
         r.timeoutInterval = 20
-        let what = "busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-")"
-        session.dataTask(with: r) { _, response, error in
-            log("sent \(what): \((response as? HTTPURLResponse)?.statusCode ?? -1) \(error?.localizedDescription ?? "")")
-        }.resume()
+        let what = "busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-") ticked=\(mind.ticked)"
+        posting?.cancel()       // only the newest state matters
+        posting = session.dataTask(with: r) { _, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            log("sent \(what): \(status) \(error?.localizedDescription ?? "")")
+            if (error as? URLError)?.code == .cancelled { return }
+            Task { @MainActor in done(status == 200) }
+        }
+        posting?.resume()
     }
 
-    /// (Re)opens the one long-lived stream. Cached messages are replayed first, so we learn the current state.
+    /// (Re)opens the one long-lived stream. Recent messages are replayed first.
     func listen() {
         stream?.cancel()
         stream = Task { [weak self] in
@@ -729,7 +773,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
                     r.timeoutInterval = 150     // the server sends a keepalive every 45 s; silence means a dead link
                     let (lines, response) = try await self.session.bytes(for: r)
                     guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-                    log("listening")
+                    log("listening on \(self.topic.lastPathComponent)")
                     for try await line in lines.lines {
                         wait = 2
                         self.receive(line)
@@ -738,23 +782,28 @@ struct Config: Decodable { let server: String, room: String, id: String }
                     log("stream ended: \(error.localizedDescription)")
                 }
                 try? await Task.sleep(nanoseconds: UInt64(wait * 1e9))
-                wait = min(wait * 2, 120)
+                wait = min(wait * 2, 300)
             }
         }
     }
 
     private func receive(_ line: String) {
-        guard let outer = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-              outer["event"] as? String == "message",
-              let body = outer["message"] as? String,
-              let inner = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any],
-              let id = inner["id"] as? String, let busy = inner["busy"] as? Bool else { return }
+        guard let outer = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }
+        let time = outer["time"] as? Double
+        guard outer["event"] as? String == "message", let sealed = outer["message"] as? String else {
+            if let time { skew = Date().timeIntervalSince1970 - time }      // "open" and "keepalive" lines carry the relay's time
+            return
+        }
         lastMessage = outer["id"] as? String ?? lastMessage
-        guard id != me else { return }
+        guard let box = Data(base64Encoded: sealed).flatMap({ try? ChaChaPoly.SealedBox(combined: $0) }),
+              let plain = try? ChaChaPoly.open(box, using: key),      // only someone with our pairing code could have sealed it
+              let inner = try? JSONSerialization.jsonObject(with: plain) as? [String: Any],
+              let id = inner["id"] as? String, id != me, let busy = inner["busy"] as? Bool else { return }
         // A friend's words are shown as plain text, but keep them short and printable all the same.
         let label = (inner["label"] as? String).map { String(String.UnicodeScalarView($0.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(40))) }
-        let mind = Mind(busy: busy, doing: Doing(rawValue: inner["doing"] as? String ?? "") ?? .think, label: label?.isEmpty == false ? label : nil)
-        let sent = (outer["time"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date()
+        let mind = Mind(busy: busy, doing: Doing(rawValue: inner["doing"] as? String ?? "") ?? .think,
+                        label: label?.isEmpty == false ? label : nil, ticked: inner["ticked"] as? Int ?? 0)
+        let sent = time.map { Date(timeIntervalSince1970: $0 + skew) } ?? Date()
         onFriend(id, mind, min(sent, Date()))
     }
 }
@@ -770,21 +819,25 @@ struct Config: Decodable { let server: String, room: String, id: String }
     private var latest = Mind()                                     // what I was last doing
     private var told = Mind()                                       // what my friend currently believes about me
     private var lastSent = Date.distantPast
+    private var retryAt: Date?, backoff: TimeInterval = 15          // the last message didn't get through
     private var idleSince: Date?
     private var budget = 0, budgetFrom = Date.distantPast           // today's allowance of "what I'm doing" updates
     private var wake: Timer?
     private var settling = false
+    // Each setting is a tick in the menu, remembered as a flag file that exists while it's off.
     private let placement = NSMenuItem(title: "Sit on the bottom edge", action: #selector(togglePlacement), keyEquivalent: "")
-    private let centeredFlag = home.appendingPathComponent("centered")     // exists when the twins sit level with the other icons
+    private let sharing = NSMenuItem(title: "Share what I'm working on", action: #selector(toggleSharing), keyEquivalent: "")
+    private let centeredFlag = home.appendingPathComponent("centered"), privateFlag = home.appendingPathComponent("private")
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let remove = NSMenuItem(title: "Remove Braincell…", action: #selector(remove), keyEquivalent: "")
         remove.target = self
-        let centered = FileManager.default.fileExists(atPath: centeredFlag.path)
-        placement.target = self
-        placement.state = centered ? .off : .on
-        item = MenuBarItem(extras: [placement, remove])
-        item.setCentered(centered, animated: false)
+        for (entry, flag) in [(placement, centeredFlag), (sharing, privateFlag)] {
+            entry.target = self
+            entry.state = FileManager.default.fileExists(atPath: flag.path) ? .off : .on
+        }
+        item = MenuBarItem(extras: [placement, sharing, remove])
+        item.setCentered(placement.state == .off, animated: false)
 
         guard let data = try? Data(contentsOf: home.appendingPathComponent("config.json")),
               let config = try? JSONDecoder().decode(Config.self, from: data), URL(string: config.server) != nil else {
@@ -793,7 +846,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
         }
         relay = Relay(config) { [weak self] id, mind, sent in
             self?.friends[id] = (mind.busy ? sent.addingTimeInterval(friendLease) : .distantPast, sent, mind)
-            log("friend \(id): busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-")")
+            log("friend \(id): busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-") ticked=\(mind.ticked)")
             self?.settle()
         }
         relay?.listen()
@@ -821,14 +874,14 @@ struct Config: Decodable { let server: String, room: String, id: String }
         after(0.25) { [weak self] in self?.settling = false; self?.evaluate() }
     }
 
-    /// The whole state machine: works out who is doing what, tells the friend, poses the twins,
-    /// and sleeps until the next moment something could change on its own.
+    /// The whole state machine: who is doing what, what to tell the friend, how to pose the twins,
+    /// and when to look again.
     private func evaluate() {
         let now = Date()
         var next: Date?
         func consider(_ d: Date) { if next == nil || d < next! { next = d } }
 
-        // Me: the Claude Code session that did something most recently, if any is mid-turn.
+        // Me: the session that did something most recently, if any is mid-turn.
         var me = Mind()
         if let newest = liveSessions(now).max(by: { $0.touched < $1.touched }) {
             me = sessions[newest.id]?.mind ?? Mind(busy: true)
@@ -836,30 +889,37 @@ struct Config: Decodable { let server: String, room: String, id: String }
             consider(newest.touched.addingTimeInterval(staleAfter))
         }
 
-        // What I tell my friend: busy at once, idle only after the grace period, and what I'm doing now and then.
+        // My friend hears "busy" at once, "idle" after the grace period, and what I'm doing now and then.
         if me.busy { idleSince = nil } else if idleSince == nil { idleSince = now }
         let say = me.busy || (told.busy && now.timeIntervalSince(idleSince!) < idleGrace)
         if !me.busy && say { consider(idleSince!.addingTimeInterval(idleGrace)) }
-        let news = say ? latest : Mind()
+        var news = say ? latest : Mind()
+        if sharing.state == .off { news.label = nil }
         let flipped = news.busy != told.busy || lastSent == .distantPast
         let overdue = say && now.timeIntervalSince(lastSent) >= reannounce
+        let retry = retryAt.map { now >= $0 } ?? false
         var detail = false
-        if say && !flipped && !overdue && news != told {
+        if say && !flipped && !overdue && !retry && news != told {
             if now.timeIntervalSince(budgetFrom) >= 86400 { budgetFrom = now; budget = detailBudget }
             let ready = lastSent.addingTimeInterval(detailEvery)
             if budget > 0 { if now >= ready { detail = true; budget -= 1 } else { consider(ready) } }
         }
-        if flipped || overdue || detail {
-            told = news; lastSent = now
-            relay?.send(news)
+        if flipped || overdue || retry || detail {
+            told = news; lastSent = now; retryAt = nil
+            relay?.send(news) { [weak self] ok in
+                guard let self else { return }
+                self.backoff = ok ? 15 : min(self.backoff * 2, 900)
+                if !ok { self.retryAt = Date().addingTimeInterval(self.backoff); self.settle() }
+            }
         }
         if say { consider(lastSent.addingTimeInterval(reannounce)) }
+        if let retryAt { consider(retryAt) }
 
         // My friend: busy until their lease runs out.
         let live = friends.values.filter { $0.until > now }
         live.forEach { consider($0.until) }
         let friend = live.max { $0.until < $1.until }?.mind ?? Mind()
-        // If they've gone quiet, since when: their last "idle", or the moment a lapsed "busy" ran out.
+        // When they went quiet: their last "idle", or the moment a lapsed "busy" ran out.
         let friendStopped = friends.values.map { $0.mind.busy ? $0.until : $0.since }.max() ?? .distantPast
 
         log("me: \(me.words) [\(me.doing.rawValue)]  friend: \(friend.words) [\(friend.doing.rawValue)]  say=\(say)")
@@ -869,8 +929,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
         wake = next.map { after(max(1, $0.timeIntervalSince(now) + 0.2)) { [weak self] in self?.evaluate() } }
     }
 
-    /// Reads what's new in each live session's log. Stale logs are deleted, so a later heartbeat
-    /// recreates the file and the folder watcher fires.
+    /// Reads what's new in each live session's log, and deletes stale ones.
     private func liveSessions(_ now: Date) -> [(id: String, touched: Date)] {
         let keys: Set<URLResourceKey> = [.contentModificationDateKey, .creationDateKey, .fileSizeKey]
         let files = (try? FileManager.default.contentsOfDirectory(at: busyDir, includingPropertiesForKeys: Array(keys), options: .skipsHiddenFiles)) ?? []
@@ -907,13 +966,21 @@ struct Config: Decodable { let server: String, room: String, id: String }
         settle()
     }
 
+    private func flip(_ entry: NSMenuItem, _ flag: URL) -> Bool {
+        let on = entry.state != .on
+        entry.state = on ? .on : .off
+        if on { try? FileManager.default.removeItem(at: flag) } else { FileManager.default.createFile(atPath: flag.path, contents: nil) }
+        return on
+    }
+
     /// Unticked, the twins float level with the other menu bar icons instead of sitting on the bar's bottom edge.
-    @objc private func togglePlacement() {
-        let centered = placement.state == .on
-        placement.state = centered ? .off : .on
-        if centered { FileManager.default.createFile(atPath: centeredFlag.path, contents: nil) }
-        else { try? FileManager.default.removeItem(at: centeredFlag) }
-        item.setCentered(centered, animated: true)
+    @objc private func togglePlacement() { item.setCentered(!flip(placement, centeredFlag), animated: true) }
+
+    /// Unticked, my friend sees the kind of work I'm doing but not the few words about it.
+    @objc private func toggleSharing() {
+        _ = flip(sharing, privateFlag)
+        lastSent = .distantPast
+        evaluate()
     }
 
     @objc private func remove() {
@@ -935,13 +1002,9 @@ struct Config: Decodable { let server: String, room: String, id: String }
 // MARK: - Main
 
 MainActor.assumeIsolated {
-    if let flag = CommandLine.arguments.firstIndex(of: "--snapshot"), CommandLine.arguments.count > flag + 1 {
-        Twins.snapshot(to: CommandLine.arguments[flag + 1])
-        exit(0)
-    }
     let app = NSApplication.shared
-    let delegate = App()
-    app.delegate = delegate
     app.setActivationPolicy(.accessory)     // no Dock icon, no windows
-    app.run()
+    let delegate = App()
+    if CommandLine.arguments.contains("--demo") { demo() } else { app.delegate = delegate }
+    withExtendedLifetime(delegate) { app.run() }
 }

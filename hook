@@ -1,8 +1,8 @@
 #!/bin/sh
-# Braincell's Claude Code hook. Usage: hook busy|tool|wait|beat|idle   (the event JSON arrives on stdin)
-#
-# Keeps one small log file per session that is mid-turn. The app watches the folder and reads
-# the new lines, so this never touches the network and adds no delay to Claude.
+# Braincell's Claude Code hook: hook busy|tool|wait|beat|idle, with the event JSON on stdin.
+# Keeps one small log per session that is mid-turn, for the app to read. It stores tool names,
+# Claude's one-line command descriptions and its to-do list: never prompts, code or commands.
+# It prints nothing and never touches the network.
 umask 077
 dir="${BRAINCELL_HOME:-$HOME/.braincell}/busy"
 event=$( { head -c 4096; cat >/dev/null; } | tr '\n\r' '  ')
@@ -10,12 +10,19 @@ case "$event" in *\"session_id\"*) ;; *) exit 0 ;; esac
 id=${event#*\"session_id\"}; id=${id#*\"}; id=${id%%\"*}
 case "$id" in ""|*[!A-Za-z0-9_-]*) exit 0 ;; esac
 log="$dir/$id"
-ping() { : > "$dir/.ping.$$" && rm -f "$dir/.ping.$$"; }   # makes a folder event, so the app looks
+ping() { : > "$dir/.ping.$$" && rm -f "$dir/.ping.$$"; }   # a folder event, so the app looks
 
 case "$1" in
   busy) mkdir -p "$dir" && rm -f "$log" && echo prompt > "$log" ;;      # a turn started
-  tool) mkdir -p "$dir"; [ -e "$log" ] || echo prompt > "$log"          # a tool is about to run:
-        printf 'tool %s\n' "$event" >> "$log"; ping ;;                  #   note which one, and what for
+  tool) mkdir -p "$dir"; [ -e "$log" ] || echo prompt > "$log"          # a tool is about to run
+        name=${event#*\"tool_name\"}; name=${name#*\"}; name=${name%%\"*}
+        case "$name" in
+          TodoWrite|TaskCreate|TaskUpdate|*update_plan) printf 'tool %s\n' "$event" ;;
+          Bash|Agent|Task) what=
+            case "$event" in *\"description\"*) what=${event#*\"description\"}; what=${what#*\"}; what=${what%%\"*}; what=${what%\\} ;; esac
+            printf 'tool {"tool_name":"%s","tool_input":{"description":"%s"}}\n' "$name" "$what" ;;
+          *) printf 'tool {"tool_name":"%s"}\n' "$name" ;;
+        esac >> "$log"; ping ;;
   wait) [ -e "$log" ] && echo wait >> "$log" && ping ;;                 # Claude is asking for permission
   beat) if [ "$(tail -c 5 "$log" 2>/dev/null)" = wait ]; then echo done >> "$log"; ping
         else touch -c "$log" 2>/dev/null; fi ;;                         # a tool finished: still going

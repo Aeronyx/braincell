@@ -4,7 +4,8 @@
 Usage: hooks.py add|remove
 
 Other hooks are left alone: Braincell's entries are appended next to them, and
-removal deletes only entries whose command runs ~/.braincell/hook.
+removal deletes only entries whose command runs ~/.braincell/hook. Each entry does
+nothing on a Mac where Braincell isn't installed, so a synced settings.json is safe.
 """
 import json
 import os
@@ -16,7 +17,8 @@ MARK = ".braincell/hook"
 
 
 def entry(action, background=False, matcher=None):
-    hook = {"type": "command", "command": f"~/.braincell/hook {action}", "timeout": 5}
+    command = f"test -x ~/.braincell/hook && ~/.braincell/hook {action} || true"
+    hook = {"type": "command", "command": command, "timeout": 5}
     if background:
         hook["async"] = True
     group = {"hooks": [hook]}

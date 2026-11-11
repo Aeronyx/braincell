@@ -1,100 +1,84 @@
 # Braincell
 
-Two little peekers in your Mac's menu bar who share one braincell. They show up when you and
-a friend are both mid-turn in Claude Code, act out what each of your Claudes is doing, and nap
-when one of you stops.
+Two little peekers in your Mac's menu bar who share one braincell. They pop up while you and a
+friend are both mid-turn in Claude Code, act out what each Claude is doing, and nap when one of
+you stops.
 
-![The twins on light and dark menu bars](twins.png)
+![The twins on a light and a dark menu bar](twins.gif)
 
 ## Install
 
-Needs macOS 13 or later on Apple Silicon or Intel, the Xcode Command Line Tools with Swift 5.9
-or later (`xcode-select --install`), and a recent Claude Code. Run on macOS 26 so far; the build
-is also checked for macOS 13 and Intel.
-
-On the first Mac:
+Needs macOS 13 or later, the Xcode Command Line Tools (`xcode-select --install`) and Claude Code.
 
 ```bash
-git clone https://github.com/Aeronyx/braincell /tmp/braincell && /tmp/braincell/install.sh; rm -rf /tmp/braincell
+git clone --depth 1 https://github.com/Aeronyx/braincell /tmp/braincell && /tmp/braincell/install.sh; rm -rf /tmp/braincell
 ```
 
-It prints a pairing code. On the second Mac, install with that code:
+It prints a pairing code. Your friend runs the same line with the code added after `install.sh`.
+Run it again any time to update; it keeps your code. To see the twins without a friend:
 
 ```bash
-git clone https://github.com/Aeronyx/braincell /tmp/braincell && /tmp/braincell/install.sh <pairing-code>; rm -rf /tmp/braincell
+~/.braincell/Braincell --demo
 ```
 
-Everything is installed into `~/.braincell`, so nothing else is left behind. Run the same line
-again any time to update; it keeps your code.
+## What they do
 
-The installer compiles the app, adds its hooks to `~/.claude/settings.json` (next to any you
-already have), and registers a login item. Claude Code sessions started after that count.
+Yours is the solid one on the left. Your friend's is the outlined one on the right.
 
-## What the twins do
-
-Yours is the solid one on the left; your friend's is the outlined one on the right. Each acts
-out what its Claude is doing, in short bursts with stillness in between:
-
-| Claude is | The twin |
+| Claude is | Its twin |
 | --- | --- |
 | thinking | gazes up |
-| reading or searching files | sweeps its eyes along the lines |
-| writing or editing | types with its paws |
+| reading or searching | sweeps its eyes along the lines |
+| writing or editing | types |
 | running commands | hops |
 | browsing the web | looks all around |
-| keeping a to-do list | tilts its head one way, then the other |
-| running subagents | conducts with both paws |
-| waiting on a permission prompt or a question | leans out and waves |
+| planning | tilts its head |
+| running subagents | conducts |
+| waiting on you | leans out and waves |
+| done with a to-do item | throws its paws up |
 
-The braincell goes to whoever switched tasks most recently, and how it travels depends on the
-work: a quick flat toss between busy hands, a weave while browsing, a high slow lob for planning.
-When you're both doing the same kind of work it hovers between the twins and they move in
-unison. If one Claude is waiting on its human the other twin gets it, and if both are waiting
-it's set down on their joined paws.
+The braincell goes to whoever switched tasks last, and they share it while both do the same kind
+of work. Whoever stops nods off and the other keeps the braincell. After five minutes asleep,
+they leave.
 
-They sit on the bottom edge of the menu bar, peeking up over whatever is below it. Untick "Sit
-on the bottom edge" in their menu to have them float level with your other menu bar icons instead.
+Click them to read what each Claude is up to ("adding custom widgets…") and how long you've
+worked together today, or to line them up with your other icons instead of sitting on the bar's
+bottom edge.
 
-They hop up from nowhere: paws first, then each head, then the braincell. Whoever stops falls asleep where they are, hands the braincell over, and
-wakes when their Claude starts again. Once someone has slept for five minutes they all leave the
-way they came: the braincell drops away, the heads duck, and the paws let go last.
+## Is it safe?
 
-Click the twins (or hover) to read what each Claude is doing in a few words, such as "adding
-custom widgets…". The words come from Claude's own to-do list and command descriptions, so they
-cost no tokens.
+Claude Code hooks tell a tiny menu bar app when your turn starts and stops, and the app tells
+your friend's app through a relay. That is all of it: about 1,200 lines you can read in one
+sitting (one Swift file, a 30-line shell hook, an installer and an uninstaller). Nothing arrives
+prebuilt. It compiles on your Mac.
+
+- **No account, analytics, auto-update or admin rights.**
+- **Your prompts, code and commands never leave your Mac,** and Braincell never stores them.
+- **It sends one line,** such as
+  `{"id":"a1b2c3d4","busy":true,"doing":"write","label":"adding custom widgets","ticked":2}`:
+  whether you're busy, the kind of work, a few words from Claude's own to-do list or command
+  description, and how many to-do items are done. The line is encrypted with a key made from your
+  pairing code, so only your friend can read it. It travels through [ntfy.sh](https://ntfy.sh),
+  which sees neither the code nor the contents. Untick "Share what I'm working on" to leave the
+  words out.
+- **It installs** `~/.braincell`, a login item, and its hooks in `~/.claude/settings.json`, next
+  to any you already have. Removing it takes all three out.
+- **It costs** 0% CPU and about 15 MB of memory while hidden, under 2% of one core while the
+  twins are out, and no tokens: the hooks print nothing.
 
 ## Remove
 
-Click the twins and choose "Remove Braincell…", or run:
-
-```bash
-~/.braincell/uninstall.sh
-```
-
-That takes out the hooks, the login item, and `~/.braincell`.
-
-## How it works
-
-- **Hooks** ([hook](hook)) keep one small log per Claude Code session that is mid-turn, in
-  `~/.braincell/busy/`: which tool is about to run and what Claude says it's for. Your prompts
-  are never stored, and the hook never touches the network.
-- **The app** ([Braincell.swift](Braincell.swift)) watches that folder. It posts to a private
-  topic on [ntfy.sh](https://ntfy.sh) named after your pairing code, and holds one streaming
-  connection to hear your friend's posts.
-- **What leaves your Mac:** whether you're busy, the kind of work (one of the eight above), and
-  up to about three words describing it. Set `shareWords` to `false` at the top of
-  `Braincell.swift` and reinstall to keep the words to yourself. Anyone who knows the pairing
-  code can read and send these, so treat it like a password.
+Click the twins and choose "Remove Braincell…", or run `~/.braincell/uninstall.sh`.
 
 ## Good to know
 
-- An interrupted turn (Esc) fires no hook, so it can count as busy for up to 10 minutes.
-- Cloud sessions don't run local hooks, so only sessions on your Mac count.
-- ntfy.sh allows 250 messages a day per person. Braincell sends one when you start or stop, one
-  every 10 minutes while you're busy, and at most one a minute (120 a day) about what you're
-  doing, so your friend's view of your activity can lag by up to a minute. To use your own ntfy
-  server (HTTPS), install with `BRAINCELL_SERVER=https://ntfy.example.com ./install.sh <pairing-code>`
-  on both Macs, then raise `detailEvery` and `detailBudget` if you like.
-- Timings, the accent color, and the twins' proportions are constants at the top of
-  `Braincell.swift`. `~/.braincell/Braincell --snapshot twins.png` renders the poses so you
-  can check a change without waiting for your friend.
+- Tested on macOS 26 with Apple Silicon and one display. The build is also checked for macOS 13
+  and Intel. With several displays, expect the twins only in the active display's menu bar.
+- Only Claude Code sessions on your Mac count, not cloud sessions.
+- A turn you interrupt with Esc can count as busy for up to 15 minutes.
+- ntfy.sh allows 250 messages a day, so your friend hears what you're doing at most once a
+  minute. To use your own ntfy server, put `BRAINCELL_SERVER=https://ntfy.example.com` in front
+  of `/tmp/braincell/install.sh` on both Macs.
+- If the twins ever stop showing up, run the install line again.
+
+[MIT](LICENSE) licensed. Not affiliated with Anthropic.

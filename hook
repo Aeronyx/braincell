@@ -1,0 +1,24 @@
+#!/bin/sh
+# Braincell's Claude Code hook. Usage: hook busy|tool|wait|beat|idle   (the event JSON arrives on stdin)
+#
+# Keeps one small log file per session that is mid-turn. The app watches the folder and reads
+# the new lines, so this never touches the network and adds no delay to Claude.
+umask 077
+dir="${BRAINCELL_HOME:-$HOME/.braincell}/busy"
+event=$( { head -c 4096; cat >/dev/null; } | tr '\n\r' '  ')
+case "$event" in *\"session_id\"*) ;; *) exit 0 ;; esac
+id=${event#*\"session_id\"}; id=${id#*\"}; id=${id%%\"*}
+case "$id" in ""|*[!A-Za-z0-9_-]*) exit 0 ;; esac
+log="$dir/$id"
+ping() { : > "$dir/.ping.$$" && rm -f "$dir/.ping.$$"; }   # makes a folder event, so the app looks
+
+case "$1" in
+  busy) mkdir -p "$dir" && rm -f "$log" && echo prompt > "$log" ;;      # a turn started
+  tool) mkdir -p "$dir"; [ -e "$log" ] || echo prompt > "$log"          # a tool is about to run:
+        printf 'tool %s\n' "$event" >> "$log"; ping ;;                  #   note which one, and what for
+  wait) [ -e "$log" ] && echo wait >> "$log" && ping ;;                 # Claude is asking for permission
+  beat) if [ "$(tail -c 5 "$log" 2>/dev/null)" = wait ]; then echo done >> "$log"; ping
+        else touch -c "$log" 2>/dev/null; fi ;;                         # a tool finished: still going
+  idle) rm -f "$log" ;;                                                 # the turn ended
+esac
+exit 0

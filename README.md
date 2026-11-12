@@ -14,9 +14,10 @@ they nap when one of you stops. Works for pairs only (for now). Incredibly light
 d=$(mktemp -d) && git clone --depth 1 https://github.com/Aeronyx/braincell "$d" && "$d/install.sh"; rm -rf "$d"
 ```
 
-Required: Xcode Command Line Tools, macOS 13+, of course Claude Code. It prints the exact line your friend should
-paste, with your pairing code already in it. Run the same again to update, or with `new` after `install.sh`
-for a fresh pairing code. To see the twins without pairing, try:
+Required: Xcode Command Line Tools, macOS 13+, and Claude Code.
+That command prints the exact line your friend should run, with your unique pairing code already in it. 
+Run the same command again to update, or with `new` after `install.sh`to get a fresh pairing code. 
+To see the twins without pairing, try:
 
 ```bash
 ~/.braincell/Braincell --demo

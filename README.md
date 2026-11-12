@@ -16,7 +16,8 @@ d=$(mktemp -d) && git clone --depth 1 https://github.com/Aeronyx/braincell "$d" 
 
 Required: Xcode Command Line Tools, macOS 13+, and Claude Code.
 That command prints the exact line your friend should run, with your unique pairing code already in it. 
-Run the same command again to update, or with `new` after `install.sh`to get a fresh pairing code. 
+When a newer version is out, an "Update" line appears in the twins' menu; one click installs it.
+Running the same command again does the same, or with `new` after `install.sh` gets a fresh pairing code.
 To see the twins without pairing, try:
 
 ```bash
@@ -37,7 +38,7 @@ your creature always stays out, even when alone.
 
 ## Is it safe?
 
-This is ~1,900 lines of Swift that you can easily read (or ask your Claude to read) in one sitting, 
+This is ~2,000 lines, nearly all Swift, that you can easily read (or ask your Claude to read) in one sitting, 
 compiled locally. No account, analytics, or admin rights; just two creatures who crave company.
 
 - **All your prompts, code, and commands never leave your Mac.**
@@ -45,6 +46,7 @@ compiled locally. No account, analytics, or admin rights; just two creatures who
   to-dos, and a few words from Claude's to-do list or command description (untick "Share what
   I'm working on" to leave the words out). [ntfy.sh](https://ntfy.sh) relays it and can't read
   it. For your own ntfy server, put `BRAINCELL_SERVER=https://…` right before `"$d/install.sh"`.
+- **It checks GitHub once a day** for a newer version number. Nothing installs unless you click.
 - **Costs zero tokens, under 15 MB of memory**, and 0% CPU while hidden (under 1% while
   they're out).
 

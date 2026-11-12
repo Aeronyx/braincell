@@ -9,20 +9,29 @@ import AppKit
 import CryptoKit
 
 let staleAfter: TimeInterval = 900    // a session silent for this long has stopped (Esc fires no hook)
-let idleGrace: TimeInterval = 20      // stay "busy" this long after a turn ends, to bridge back-to-back prompts
-let reannounce: TimeInterval = 600    // repeat "busy" this often...
-let friendLease: TimeInterval = 1500  // ...and forget a friend's "busy" once it's this old
+let idleGrace: TimeInterval = 120     // stay "busy" this long after a turn ends, to bridge the pause between prompts
+let reannounce: TimeInterval = 1200   // repeat "busy" this often...
+let friendLease: TimeInterval = 2700  // ...and forget a friend's "busy" once it's this old
 let napFor: TimeInterval = 300        // whoever stops sleeps this long before leaving
 let squabbleOdds = 100_000            // the twins' squabble: one chance in this many each quiet moment together, so every few months
 let longDay: TimeInterval = 4 * 3600  // after this much work in a day, a twin is worn out
-let detailEvery: TimeInterval = 60    // say what I'm doing at most this often...
-let detailBudget = 120                // ...and this many times a day (ntfy.sh allows 250 messages a day)
+let detailEvery: TimeInterval = 180   // say what I'm doing at most this often
+// A relay takes only so many messages a day (ntfy.sh: 250 from one network). Every message of
+// mine comes out of an allowance that refills slowly and is remembered across restarts, so this
+// Mac never sends more than 210 in a day. The last few are kept for "busy" and "idle".
+let allowance = (full: 30.0, every: 480.0, spare: 10.0)     // how many when full, seconds until one more, how many are kept back
+let repo = "Aeronyx/braincell"        // where a newer version would come from
 let accent = NSColor(srgbRed: 0.91, green: 0.55, blue: 0.37, alpha: 1)
 
 let home = ProcessInfo.processInfo.environment["BRAINCELL_HOME"].map { URL(fileURLWithPath: $0) }
     ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".braincell")
 let busyDir = home.appendingPathComponent("busy")
 let debug = ProcessInfo.processInfo.environment["BRAINCELL_DEBUG"] != nil
+let web: URLSession = {               // everything that touches the network goes through here: the relay and, once a day, GitHub
+    let c = URLSessionConfiguration.ephemeral
+    c.waitsForConnectivity = true     // offline: wait quietly instead of retrying
+    return URLSession(configuration: c)
+}()
 
 func log(_ s: @autoclosure () -> String) {
     if debug { FileHandle.standardError.write((s() + "\n").data(using: .utf8)!) }
@@ -1133,10 +1142,12 @@ final class Twins: NSView {
     var onSquabble: (() -> Void)?       // my twins have fallen out: time to tell my friend's
     var paired = true                   // false until a friend's Mac has ever been heard from
     var crowded = false { didSet { crowd.isHidden = !crowded } }      // a third Mac is using our pairing code
+    var trouble: String? { didSet { woe.title = trouble ?? ""; woe.isHidden = trouble == nil } }      // why my friend can't see me, if they can't
     private let item = NSStatusBar.system.statusItem(withLength: Twins.size.width)
     private let twins = Twins()
     private let mine = NSMenuItem(), theirs = NSMenuItem(), tally = NSMenuItem()
     private let crowd = NSMenuItem(title: "This pairing code is on more than two Macs", action: nil, keyEquivalent: "")
+    private let woe = NSMenuItem()
     private var out = [false, false]    // which twins are on the ledge
     private var room = Twins.size.width // how wide a slot they need for now
     private var latest: (me: Mind, friend: Mind, stopped: [Date?])?
@@ -1151,8 +1162,8 @@ final class Twins: NSView {
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.delegate = self
-        for line in [mine, theirs, tally, crowd] { line.isEnabled = false; menu.addItem(line) }
-        crowd.isHidden = true
+        for line in [mine, theirs, tally, crowd, woe] { line.isEnabled = false; menu.addItem(line) }
+        crowd.isHidden = true; woe.isHidden = true
         if !extras.isEmpty { menu.addItem(.separator()) }
         extras.forEach { menu.addItem($0) }
         item.isVisible = false
@@ -1319,9 +1330,8 @@ final class Twins: NSView {
 struct Config: Decodable { let server: String, room: String, id: String }
 
 @MainActor final class Relay {
-    private let topic: URL, key: SymmetricKey, me: String
+    private let server: URL, topic: URL, key: SymmetricKey, me: String
     private let onFriend: (_ id: String, _ mind: Mind, _ sent: Date, _ squabble: Bool) -> Void
-    private let session: URLSession
     private var stream: Task<Void, Never>?
     private var posting: URLSessionDataTask?
     private var lastMessage: String?
@@ -1336,16 +1346,16 @@ struct Config: Decodable { let server: String, room: String, id: String }
         }
         key = derive("braincell key", bytes: 32)
         let name = derive("braincell topic", bytes: 16).withUnsafeBytes { $0.map { String(format: "%02x", $0) }.joined() }
-        topic = URL(string: config.server)!.appendingPathComponent("braincell-" + name)
+        server = URL(string: config.server)!
+        topic = server.appendingPathComponent("braincell-" + name)
         me = config.id
         self.onFriend = onFriend
-        let c = URLSessionConfiguration.ephemeral
-        c.waitsForConnectivity = true      // offline: wait quietly instead of retrying
-        session = URLSession(configuration: c)
     }
 
+    var host: String { server.host ?? "the relay" }
+
     /// Everything that ever leaves this Mac: this one line, sealed so only the two of us can read it.
-    func send(_ mind: Mind, squabble: Bool = false, then done: @escaping @MainActor @Sendable (Bool) -> Void = { _ in }) {
+    func send(_ mind: Mind, squabble: Bool = false, then done: @escaping @MainActor @Sendable (_ status: Int) -> Void = { _ in }) {
         var line: [String: Any] = ["id": me, "busy": mind.busy]
         if mind.busy { line["doing"] = mind.doing.rawValue; line["ticked"] = mind.ticked }
         if mind.busy, let label = mind.label { line["label"] = label }
@@ -1359,13 +1369,23 @@ struct Config: Decodable { let server: String, room: String, id: String }
         r.timeoutInterval = 20
         let what = "busy=\(mind.busy) \(mind.doing.rawValue) \(mind.label ?? "-") ticked=\(mind.ticked) \(mind.mood.rawValue)"
         posting?.cancel()       // only the newest state matters
-        posting = session.dataTask(with: r) { _, response, error in
+        posting = web.dataTask(with: r) { _, response, error in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             log("sent \(what): \(status) \(error?.localizedDescription ?? "")")
             if (error as? URLError)?.code == .cancelled { return }
-            Task { @MainActor in done(status == 200) }
+            Task { @MainActor in done(status) }
         }
         posting?.resume()
+    }
+
+    /// A relay that has taken all it will from this network today says when its count starts over
+    /// (ntfy tells anyone who asks). Nil if that isn't why it said no.
+    func quotaReset(then done: @escaping @MainActor @Sendable (Date?) -> Void) {
+        web.dataTask(with: server.appendingPathComponent("v1/account")) { data, _, _ in
+            let stats = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["stats"] as? [String: Any]
+            let reset = stats?["messages_remaining"] as? Int == 0 ? (stats?["reset_at"] as? Double).map { Date(timeIntervalSince1970: $0) } : nil
+            Task { @MainActor in done(reset) }
+        }.resume()
     }
 
     /// (Re)opens the one long-lived stream. Recent messages are replayed first.
@@ -1380,7 +1400,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
                     url.queryItems = [URLQueryItem(name: "since", value: self.lastMessage ?? "\(Int(friendLease))s")]
                     var r = URLRequest(url: url.url!)
                     r.timeoutInterval = 150     // the server sends a keepalive every 45 s; silence means a dead link
-                    let (lines, response) = try await self.session.bytes(for: r)
+                    let (lines, response) = try await web.bytes(for: r)
                     guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
                     log("listening on \(self.topic.lastPathComponent)")
                     for try await line in lines.lines {
@@ -1432,16 +1452,23 @@ struct Config: Decodable { let server: String, room: String, id: String }
     private var latest = Mind()                                     // what I was last doing
     private var told = Mind()                                       // what my friend currently believes about me
     private var lastSent = Date.distantPast
-    private var retryAt: Date?, backoff: TimeInterval = 15          // the last message didn't get through
+    private var retryAt: Date?, backoff: TimeInterval = 15, failed = 0     // the last message didn't get through
+    private var quietUntil: Date?                                   // the relay has had its fill of this network until then
+    private let allowanceFile = home.appendingPathComponent("allowance")
+    private lazy var fullAt: Date = {                               // when my allowance of messages will be full again
+        let saved = (try? String(contentsOf: allowanceFile, encoding: .utf8)).flatMap { Double($0) } ?? 0
+        return Date(timeIntervalSince1970: min(saved, Date().timeIntervalSince1970 + allowance.full * allowance.every))
+    }()
     private var idleSince: Date?
     private var worked: TimeInterval = 0, workingSince: Date?, workDay = Date()    // how long my Claude has worked today
-    private var budget = 0, budgetFrom = Date.distantPast           // today's allowance of "what I'm doing" updates
+    private var version = "0", updating: DispatchSourceProcess?
     private var wake: Timer?
     private var settling = false
     // Each setting is a tick in the menu, remembered as a flag file that exists while it's off.
     private let placement = NSMenuItem(title: "Sit on the bottom edge", action: #selector(togglePlacement), keyEquivalent: "")
     private let sharing = NSMenuItem(title: "Share what I'm working on", action: #selector(toggleSharing), keyEquivalent: "")
     private let shyness = NSMenuItem(title: "Disappear when idle", action: #selector(toggleShyness), keyEquivalent: "")
+    private let update = NSMenuItem(title: "", action: #selector(runUpdate), keyEquivalent: "")
     private let centeredFlag = home.appendingPathComponent("centered"), privateFlag = home.appendingPathComponent("private")
     private let stayFlag = home.appendingPathComponent("stay")
 
@@ -1452,7 +1479,9 @@ struct Config: Decodable { let server: String, room: String, id: String }
             entry.target = self
             entry.state = FileManager.default.fileExists(atPath: flag.path) ? .off : .on
         }
-        item = MenuBarItem(extras: [placement, sharing, shyness, remove])
+        update.target = self
+        update.isHidden = true
+        item = MenuBarItem(extras: [placement, sharing, shyness, remove, update])
         item.setCentered(placement.state == .off, animated: false)
         item.shy = shyness.state == .on
 
@@ -1475,7 +1504,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
         }
         item.paired = FileManager.default.fileExists(atPath: pairedFlag.path)
         item.onSquabble = { [weak self] in
-            if let self { self.relay?.send(self.told, squabble: true) { [weak self] ok in self?.delivered(ok) } }
+            if let self { self.spend(Date()); self.relay?.send(self.told, squabble: true) { [weak self] status in self?.delivered(status) } }
         }
         relay?.listen()
 
@@ -1493,6 +1522,18 @@ struct Config: Decodable { let server: String, room: String, id: String }
         center.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         center.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
         evaluate()
+
+        version = (try? String(contentsOf: home.appendingPathComponent("version"), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+        checkForUpdate()
+        after(86400, repeats: true) { [weak self] in self?.checkForUpdate() }
+    }
+
+    /// How many messages I may send right now, and when that will have grown to a given number.
+    private func left(_ now: Date) -> Double { allowance.full - max(0, fullAt.timeIntervalSince(now)) / allowance.every }
+    private func whenLeft(_ messages: Double) -> Date { fullAt.addingTimeInterval((messages - allowance.full) * allowance.every) }
+    private func spend(_ now: Date) {
+        fullAt = max(fullAt, now).addingTimeInterval(allowance.every)
+        try? String(fullAt.timeIntervalSince1970).write(to: allowanceFile, atomically: true, encoding: .utf8)
     }
 
     /// Coalesces bursts (a replayed backlog, several hooks at once) into one evaluation.
@@ -1533,25 +1574,30 @@ struct Config: Decodable { let server: String, room: String, id: String }
             if today < longDay { consider(now.addingTimeInterval(longDay - today)) }
         }
 
-        // My friend hears "busy" at once, "idle" after the grace period, and what I'm doing now and then.
+        // My friend hears "busy" at once, "idle" after the grace period, and what I'm doing every few
+        // minutes, all out of the allowance. Nearly out, "idle" waits until it's sure to last.
+        let grace = idleGrace * (left(now) < allowance.spare / 2 ? 5 : 1)
         if me.busy { idleSince = nil } else if idleSince == nil { idleSince = now }
-        let say = me.busy || (told.busy && now.timeIntervalSince(idleSince!) < idleGrace)
-        if !me.busy && say { consider(idleSince!.addingTimeInterval(idleGrace)) }
+        let say = me.busy || (told.busy && now.timeIntervalSince(idleSince!) < grace)
+        if !me.busy && say { consider(idleSince!.addingTimeInterval(grace)) }
         var news = say ? latest : Mind()
         news.mood = me.mood
         if sharing.state == .off { news.label = nil }
         let flipped = news.busy != told.busy || lastSent == .distantPast || (!say && news.mood != told.mood)
         let overdue = say && now.timeIntervalSince(lastSent) >= reannounce
         let retry = retryAt.map { now >= $0 } ?? false
-        var detail = false
-        if say && !flipped && !overdue && !retry && news != told {
-            if now.timeIntervalSince(budgetFrom) >= 86400 { budgetFrom = now; budget = detailBudget }
-            let ready = lastSent.addingTimeInterval(detailEvery)
-            if budget > 0 { if now >= ready { detail = true; budget -= 1 } else { consider(ready) } }
-        }
-        if flipped || overdue || retry || detail {
-            told = news; lastSent = now; retryAt = nil
-            relay?.send(news) { [weak self] ok in self?.delivered(ok) }
+        let must = flipped || overdue || retry
+        let detail = !must && say && news != told
+        let ready = detail ? max(lastSent.addingTimeInterval(detailEvery), whenLeft(allowance.spare + 1)) : whenLeft(1)
+        if let quiet = quietUntil, now < quiet {
+            consider(quiet)
+        } else if must || detail {
+            if now >= ready {
+                spend(now); told = news; lastSent = now; retryAt = nil
+                relay?.send(news) { [weak self] status in self?.delivered(status) }
+            } else {
+                consider(ready)
+            }
         }
         if say { consider(lastSent.addingTimeInterval(reannounce)) }
         if let retryAt { consider(retryAt) }
@@ -1568,16 +1614,34 @@ struct Config: Decodable { let server: String, room: String, id: String }
         let crowdedUntil = crowdedAt?.addingTimeInterval(86400)                 // the menu says so for a day
         item.crowded = crowdedUntil.map { $0 > now } ?? false
         if item.crowded { consider(crowdedUntil!) }
+        let host = relay?.host ?? ""
+        if let quiet = quietUntil, now < quiet {
+            item.trouble = "\(host)'s daily limit is used up. Your friend sees you again at \(DateFormatter.localizedString(from: quiet, dateStyle: .none, timeStyle: .short))"
+        } else {
+            item.trouble = failed >= 3 ? "Can't reach \(host), so your friend can't see you" : nil
+        }
         item.update(me: me, friend: friend, stopped: [me.busy ? nil : idleSince, friend.busy ? nil : friendStopped])
 
         wake?.invalidate()
         wake = next.map { after(max(1, $0.timeIntervalSince(now) + 0.2)) { [weak self] in self?.evaluate() } }
     }
 
-    /// A message that didn't get through goes again later, after a pause that grows each time.
-    private func delivered(_ ok: Bool) {
+    /// A message that didn't get through goes again later, after a pause that grows each time. If the
+    /// relay has taken all it will from this network today, nothing goes until its count starts over.
+    private func delivered(_ status: Int) {
+        let ok = status == 200
         backoff = ok ? 15 : min(backoff * 2, 900)
-        if !ok { retryAt = Date().addingTimeInterval(backoff); settle() }
+        failed = ok ? 0 : failed + 1
+        if ok { quietUntil = nil } else { retryAt = Date().addingTimeInterval(backoff) }
+        if status == 429 {
+            relay?.quotaReset { [weak self] reset in
+                guard let self, let reset, reset > Date(), reset < Date().addingTimeInterval(2 * 86400) else { return }
+                self.quietUntil = reset.addingTimeInterval(60)
+                self.retryAt = self.quietUntil
+                self.settle()
+            }
+        }
+        settle()
     }
 
     /// Reads what's new in each live session's log, and deletes stale ones.
@@ -1609,7 +1673,7 @@ struct Config: Decodable { let server: String, room: String, id: String }
     }
 
     @objc private func willSleep() {
-        if told.busy { told = Mind(); lastSent = Date(); relay?.send(told) }
+        if told.busy { told = Mind(); lastSent = Date(); spend(lastSent); relay?.send(told) }
     }
 
     @objc private func didWake() {
@@ -1636,6 +1700,47 @@ struct Config: Decodable { let server: String, room: String, id: String }
 
     /// Unticked, my twin stays out all the time: asleep whenever I'm not working, with my friend's beside it whenever they are.
     @objc private func toggleShyness() { item.shy = flip(shyness, stayFlag) }
+
+    /// Once a day, reads one line from GitHub: the newest version's number. If it's newer than
+    /// this one, the menu offers it.
+    private func checkForUpdate() {
+        guard updating == nil, let url = URL(string: "https://raw.githubusercontent.com/\(repo)/main/version") else { return }
+        web.dataTask(with: URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)) { [weak self] data, response, _ in
+            guard (response as? HTTPURLResponse)?.statusCode == 200, let data, data.count <= 16 else { return }
+            let newest = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !newest.isEmpty, newest.allSatisfy({ "0123456789.".contains($0) }) else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.updating == nil else { return }
+                self.update.title = "Update to \(newest)"
+                self.update.isHidden = newest.compare(self.version, options: .numeric) != .orderedDescending
+            }
+        }.resume()
+    }
+
+    /// Fetches the newest Braincell and installs it over this one, just as the line in the README
+    /// does. It runs in a session of its own, because installing stops this app partway through.
+    @objc private func runUpdate() {
+        let command = "exec >/dev/null 2>\"$0\"; d=$(mktemp -d) && GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 https://github.com/\(repo) \"$d\" && \"$d/install.sh\"; s=$?; rm -rf \"$d\"; exit $s"
+        let arguments = ["/bin/sh", "-c", command, home.appendingPathComponent("update.log").path].map { strdup($0) } + [nil]
+        defer { arguments.forEach { free($0) } }
+        var how: posix_spawnattr_t?, pid: pid_t = 0
+        posix_spawnattr_init(&how)
+        posix_spawnattr_setflags(&how, Int16(POSIX_SPAWN_SETSID))
+        defer { posix_spawnattr_destroy(&how) }
+        guard posix_spawn(&pid, "/bin/sh", nil, &how, arguments, environ) == 0 else { return }
+        update.title = "Updating…"
+        update.isEnabled = false
+        let done = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+        done.setEventHandler { MainActor.assumeIsolated { [weak self] in
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+            self?.update.title = "Couldn't update. Try again"      // had it worked, this app would have been replaced by now
+            self?.update.isEnabled = true
+            self?.updating = nil
+        } }
+        done.resume()
+        updating = done
+    }
 
     @objc private func remove() {
         NSApp.activate(ignoringOtherApps: true)

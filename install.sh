@@ -50,7 +50,7 @@ echo "Building Braincell…"
 mkdir -p "$home/busy" "$(dirname "$plist")"
 chmod 700 "$home"      # the pairing code inside is for this account only
 swiftc -O -swift-version 5 Braincell.swift -o "$home/Braincell"
-cp hook hooks.py uninstall.sh "$home/"
+cp hook hooks.py uninstall.sh version "$home/"
 chmod +x "$home/hook" "$home/uninstall.sh"
 xattr -dr com.apple.quarantine "$home" 2>/dev/null || true   # a copy that came from a zip or AirDrop carries a download flag
 printf '{\n  "server": "%s",\n  "room": "%s",\n  "id": "%s"\n}\n' "$server" "$room" "$id" > "$home/config.json"

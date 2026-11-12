@@ -22,7 +22,7 @@ for a fresh pairing code. To see the twins without pairing, try:
 ~/.braincell/Braincell --demo
 ```
 
-## What they do
+## What they (the twins) do
 
 Mostly, they just hang out and pass around the braincell; sometimes, they act out their current
 tasks: gazing up to think, tapping its hands to type, or squinting at a command. Whoever stops 

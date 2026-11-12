@@ -8,7 +8,7 @@ Two little creatures that hang out at the bottom of your Mac menu bar and share 
 when both you and a friend are using Claude Code simultaneously, they act out what each Claude is doing, and 
 they nap when one of you stops. Works for pairs only (for now). Incredibly lightweight and memory efficient.
 
-## Install
+## Quick Install (cleans itself up)
 
 ```bash
 d=$(mktemp -d) && git clone --depth 1 https://github.com/Aeronyx/braincell "$d" && "$d/install.sh"; rm -rf "$d"

@@ -13,7 +13,7 @@ let idleGrace: TimeInterval = 20      // stay "busy" this long after a turn ends
 let reannounce: TimeInterval = 600    // repeat "busy" this often...
 let friendLease: TimeInterval = 1500  // ...and forget a friend's "busy" once it's this old
 let napFor: TimeInterval = 300        // whoever stops sleeps this long before leaving
-let squabbleAfter = 183.0...365.0     // days from one of the twins' squabbles to the next: once or twice a year
+let squabbleOdds = 100_000            // the twins' squabble: one chance in this many each quiet moment together, so every few months
 let longDay: TimeInterval = 4 * 3600  // after this much work in a day, a twin is worn out
 let detailEvery: TimeInterval = 60    // say what I'm doing at most this often...
 let detailBudget = 120                // ...and this many times a day (ntfy.sh allows 250 messages a day)
@@ -481,8 +481,8 @@ final class Twins: NSView {
         let rested = up.filter { free($0) && now - acted[$0] > rest }
         if owed != nil, free(0), free(1) {
             settleUp()
-        } else if free(0), free(1), !showOff, now - max(woke[0], woke[1]) > 60, rarely(20), squabbleDue(), squabble(record: true) {
-            onSquabble?()                                                                   // once or twice a year, they fall out
+        } else if !showOff, rarely(squabbleOdds), squabble() {
+            onSquabble?()                                                                   // every few months, they fall out
             return
         } else if rested.count == 2, doing[0] == doing[1], doing[0] != .think, rarely(3) {
             for who in up { start(.act(doing[who]), on: who, for: doing[who].beat) }        // same work: they move as one
@@ -793,32 +793,21 @@ final class Twins: NSView {
 
     // MARK: The squabble
 
-    /// Once or twice a year, the one without the braincell helps itself, and it gets out of hand.
+    /// Every few months, the one without the braincell helps itself, and it gets out of hand.
     /// It's all here as keyframes, in seconds from the start: A is whose braincell it was, B the
     /// one who took it.
     private struct Scene { let start: CFTimeInterval, owner: Int; var cue = 0 }
     private var scene: Scene?
     static let squabbleLength = 22.0
-    private static let squabbled = home.appendingPathComponent("squabbled")     // this file's date is when they last did
     var absorbed: Bool { scene != nil }
-    var lastSquabble: Date? { (try? FileManager.default.attributesOfItem(atPath: Twins.squabbled.path))?[.modificationDate] as? Date }
 
-    /// The next one comes six months to a year after the last: where in that range depends on the
-    /// date itself. Before there has been one, the wait starts the first time this is asked.
-    private func squabbleDue() -> Bool {
-        guard let last = lastSquabble else { FileManager.default.createFile(atPath: Twins.squabbled.path, contents: nil); return false }
-        let spread = max(1, Int(squabbleAfter.upperBound - squabbleAfter.lowerBound))
-        let days = squabbleAfter.lowerBound + Double(Int(last.timeIntervalSince1970) % spread)
-        return Date().timeIntervalSince(last) > days * 86400
-    }
-
-    /// Starts it, if both are up with nothing else going on. record: this one counts (the demo's doesn't).
-    @discardableResult func squabble(record: Bool = false) -> Bool {
+    /// Starts it, if both are up with nothing else going on.
+    @discardableResult func squabble() -> Bool {
         guard scene == nil, here[1], free(0), free(1), hop == nil, tweens.isEmpty, pose["perch"]! == 0, cellAt == 0 || cellAt == 1 else { return false }
         scene = Scene(start: now, owner: Int(cellAt))
         queued = [nil, nil]
         for who in 0..<2 { gesture[who] = Gesture(move: .squabble, start: now, length: Twins.squabbleLength, cut: nil) }
-        if record { FileManager.default.createFile(atPath: Twins.squabbled.path, contents: nil); log("twins: squabble") }
+        log("twins: squabble")
         run()
         return true
     }
@@ -1271,11 +1260,10 @@ final class Twins: NSView {
 
     /// On my friend's Mac the twins have just fallen out, so here they do too, as soon as they have a moment.
     func squabbleToo() {
-        if let last = twins.lastSquabble, Date().timeIntervalSince(last) < squabbleAfter.lowerBound / 2 * 86400 { return }     // too soon to be true
         var tries = 0, timer: Timer?
         timer = after(0.5, repeats: true) { [weak self] in
             tries += 1
-            if self?.twins.squabble(record: true) != false || tries == 10 { timer?.invalidate() }
+            if self?.twins.squabble() != false || tries == 10 { timer?.invalidate() }
         }
     }
 }

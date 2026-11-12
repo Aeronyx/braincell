@@ -47,7 +47,7 @@ compiled locally. No account, analytics, or admin rights; just two creatures who
 - **Costs zero tokens, under 15 MB of memory**, and 0% CPU while hidden (under 1% while
   they're out).
 
-## Remove
+## Uninstall
 
 Click the twins and choose "Remove Braincell…", or run `~/.braincell/uninstall.sh`. Either
 takes out everything it added, its hooks in `~/.claude/settings.json` included.

@@ -12,7 +12,8 @@ import os
 import shutil
 import sys
 
-SETTINGS = os.environ.get("BRAINCELL_SETTINGS") or os.path.expanduser("~/.claude/settings.json")
+LINK = os.environ.get("BRAINCELL_SETTINGS") or os.path.expanduser("~/.claude/settings.json")
+SETTINGS = os.path.realpath(LINK)      # if it's a link into a dotfiles folder, edit the file it points at
 MARK = ".braincell/hook"
 
 
@@ -78,13 +79,15 @@ def main():
         settings.pop("hooks", None)
 
     os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
-    backup = SETTINGS + ".before-braincell"
+    backup = LINK + ".before-braincell"
     if action == "add" and os.path.exists(SETTINGS) and not os.path.exists(backup):
         shutil.copy2(SETTINGS, backup)
     tmp = SETTINGS + ".braincell-tmp"
     with open(tmp, "w") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
+    if os.path.exists(SETTINGS):
+        shutil.copymode(SETTINGS, tmp)      # keep it as private as it was
     os.replace(tmp, SETTINGS)
 
 

@@ -4,9 +4,9 @@
   <img src="twins.gif" alt="The twins on a light and a dark menu bar" width="700">
 </p>
 
-Two little peekers in your Mac's menu bar who share one braincell. They pop up while you and a
-friend are both working in Claude Code, act out what each Claude is doing, and nap when one of
-you stops. For exactly two people (for now).
+Two little creatures that hang out at the bottom of your Mac menu bar and share one braincell; they only appear 
+when both you and a friend are using Claude Code simultaneously, they act out what each Claude is doing, and 
+they nap when one of you stops. Works for pairs only (for now). Incredibly lightweight and memory efficient.
 
 ## Install
 
@@ -14,9 +14,9 @@ you stops. For exactly two people (for now).
 d=$(mktemp -d) && git clone --depth 1 https://github.com/Aeronyx/braincell "$d" && "$d/install.sh"; rm -rf "$d"
 ```
 
-Needs macOS 13+, the Xcode Command Line Tools and Claude Code. It prints the line your friend
-pastes, with your pairing code in it. Run it again to update, or with `new` after `install.sh`
-for a fresh code. To meet the twins right away:
+Required: Xcode Command Line Tools, macOS 13+, of course Claude Code. It prints the exact line your friend should
+paste, with your pairing code already in it. Run the same again to update, or with `new` after `install.sh`
+for a fresh pairing code. To see the twins without pairing, try:
 
 ```bash
 ~/.braincell/Braincell --demo
@@ -24,27 +24,27 @@ for a fresh code. To meet the twins right away:
 
 ## What they do
 
-Yours is the solid one, your friend's the outline. Mostly they sit still and watch the
-braincell. Now and then one acts out its Claude's work: gazing up to think, tapping its paws to
-write, squinting at a command. Whoever stops nods off, and five minutes later they slip away.
+Mostly, they just hang out and pass around the braincell; sometimes, they act out their current
+tasks: gazing up to think, tapping its hands to type, or squinting at a command. Whoever stops 
+first goes to sleep, and five minutes later they disappear (by default).
 
-Rarer things happen too: a hug after an hour apart, a high five for each hour worked together,
-a slump when someone runs out of usage. (And some easter egg animations exist.)
+Some rare things can happen too: a hug after an hour apart, a highfive for each hour spent working 
+together, or a slump when one of you runs out of usage (plus some easter egg animations exist).
 
-Click them to read what each Claude is up to. Untick "Disappear when idle" there, and yours
-stays out all day.
+Click/hover them to read what each of your Claudes is up to. Untick "Disappear when idle"  and 
+your creature always stays out, even when alone.
 
 ## Is it safe?
 
-About 1,900 lines you can read in one sitting, compiled on your own Mac. No account, no
-analytics, no admin rights.
+This is ~1,900 lines of Swift that you can easily read (or ask your Claude to read) in one sitting, 
+compiled locally. No account, analytics, or admin rights; just two creatures who crave company.
 
-- **Your prompts, code and commands never leave your Mac.**
+- **All your prompts, code, and commands never leave your Mac.**
 - **Your friend gets one encrypted line:** busy or not, the kind of work, a mood, finished
   to-dos, and a few words from Claude's to-do list or command description (untick "Share what
   I'm working on" to leave the words out). [ntfy.sh](https://ntfy.sh) relays it and can't read
   it. For your own ntfy server, put `BRAINCELL_SERVER=https://…` right before `"$d/install.sh"`.
-- **It costs** zero tokens, under 15 MB of memory, and 0% CPU while hidden (under 1% while
+- **Costs zero tokens, under 15 MB of memory**, and 0% CPU while hidden (under 1% while
   they're out).
 
 ## Remove

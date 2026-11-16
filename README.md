@@ -6,7 +6,7 @@
 
 Two little creatures that hang out at the bottom of your Mac menu bar and share one braincell; they only appear 
 when both you and a friend are using Claude Code simultaneously, they act out what each Claude is doing, and 
-they nap when one of you stops. Works for pairs only (for now). Incredibly lightweight and memory efficient.
+they nap when one of you stops. Works for pairs, or trios with a big brother in the back. Incredibly lightweight and memory efficient.
 
 ## Quick Install (cleans itself up)
 
@@ -15,7 +15,7 @@ d=$(mktemp -d) && git clone --depth 1 https://github.com/Aeronyx/braincell "$d" 
 ```
 
 Required: Xcode Command Line Tools, macOS 13+, and Claude Code.
-That command prints the exact line your friend should run, with your unique pairing code already in it. 
+That command prints the exact lines your friends should run (one for your twin, one for a big brother), with your unique pairing code already in it. 
 When a newer version is out, an "Update" line appears in the twins' menu; one click installs it.
 Running the same command again does the same, or with `new` after `install.sh` gets a fresh pairing code.
 To see the twins without pairing, try:
@@ -38,7 +38,7 @@ your creature always stays out, even when alone.
 
 ## Is it safe?
 
-This is ~2,000 lines, nearly all Swift, that you can easily read (or ask your Claude to read) in one sitting, 
+This is ~2,400 lines, nearly all Swift, that you can easily read (or ask your Claude to read) in one sitting, 
 compiled locally. No account, analytics, or admin rights; just two creatures who crave company.
 
 - **All your prompts, code, and commands never leave your Mac.**
@@ -47,7 +47,7 @@ compiled locally. No account, analytics, or admin rights; just two creatures who
   I'm working on" to leave the words out). [ntfy.sh](https://ntfy.sh) relays it and can't read
   it. For your own ntfy server, put `BRAINCELL_SERVER=https://…` right before `"$d/install.sh"`.
 - **It checks GitHub once a day** for a newer version number. Nothing installs unless you click.
-- **Costs zero tokens, under 15 MB of memory**, and 0% CPU while hidden (under 1% while
+- **Costs zero tokens, under 20 MB of memory**, and 0% CPU while hidden (under 1% while
   they're out).
 
 ## Uninstall

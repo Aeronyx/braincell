@@ -16,10 +16,12 @@ let napFor: TimeInterval = 300        // whoever stops sleeps this long before l
 let squabbleOdds = 100_000            // the twins' squabble: one chance in this many each quiet moment together, so every few months
 let longDay: TimeInterval = 4 * 3600  // after this much work in a day, a twin is worn out
 let detailEvery: TimeInterval = 180   // say what I'm doing at most this often
+let firstWords: TimeInterval = 20     // a turn's first "busy" waits this long for something more to say than "thinking"
 // A relay takes only so many messages a day (ntfy.sh: 250 from one network). Every message of
-// mine comes out of an allowance that refills slowly and is remembered across restarts, so this
-// Mac never sends more than 210 in a day. The last few are kept for "busy" and "idle".
-let allowance = (full: 30.0, every: 480.0, spare: 10.0)     // how many when full, seconds until one more, how many are kept back
+// mine comes out of an allowance that refills slowly and is remembered across restarts: one more
+// every 8 minutes, or, while the relay says there's plenty left today, often enough to spread my
+// share of it until the count starts over. The last few are kept for "busy" and "idle".
+let allowance = (full: 30.0, every: 480.0, fastest: 120.0, spare: 10.0)   // how many when full, seconds until one more (slowest, fastest), how many are kept back
 let netCheck = (every: 15, minGap: 600.0, maxGap: 7200.0)  // ask the relay about this network's allowance after this many messages, within these bounds
 let tightBelow: TimeInterval = 900    // with under one message per this long left for me, "busy" and "idle" stretch out too
 let repo = "Aeronyx/braincell"        // where a newer version would come from
@@ -1739,9 +1741,12 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
     private var pace: TimeInterval = 0                              // so what can wait goes no more often than this...
     private var tight = false                                       // ...and "busy" and "idle" stretch out too
     private let allowanceFile = home.appendingPathComponent("allowance")
+    private var every = allowance.every                             // how fast my allowance refills just now
     private lazy var fullAt: Date = {                               // when my allowance of messages will be full again
-        let saved = (try? String(contentsOf: allowanceFile, encoding: .utf8)).flatMap { Double($0) } ?? 0
-        return Date(timeIntervalSince1970: min(saved, Date().timeIntervalSince1970 + allowance.full * allowance.every))
+        // Saved with the pace it was counted at, and counted again at the slowest, so a restart never adds to it.
+        let saved = ((try? String(contentsOf: allowanceFile, encoding: .utf8)) ?? "").split(separator: " ").compactMap { Double($0) }
+        let now = Date().timeIntervalSince1970, owed = max(0, (saved.first ?? 0) - now) * allowance.every / (saved.count > 1 ? max(1, saved[1]) : allowance.every)
+        return Date(timeIntervalSince1970: now + min(owed, allowance.full * allowance.every))
     }()
     private var idleSince: Date?
     private var worked: TimeInterval = 0, workingSince: Date?, workDay = Date()    // how long my Claude has worked today
@@ -1824,11 +1829,20 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
     }
 
     /// How many messages I may send right now, and when that will have grown to a given number.
-    private func left(_ now: Date) -> Double { allowance.full - max(0, fullAt.timeIntervalSince(now)) / allowance.every }
-    private func whenLeft(_ messages: Double) -> Date { fullAt.addingTimeInterval((messages - allowance.full) * allowance.every) }
+    private func left(_ now: Date) -> Double { allowance.full - max(0, fullAt.timeIntervalSince(now)) / every }
+    private func whenLeft(_ messages: Double) -> Date { fullAt.addingTimeInterval((messages - allowance.full) * every) }
     private func spend(_ now: Date) {
-        fullAt = max(fullAt, now).addingTimeInterval(allowance.every)
-        try? String(fullAt.timeIntervalSince1970).write(to: allowanceFile, atomically: true, encoding: .utf8)
+        fullAt = max(fullAt, now).addingTimeInterval(every)
+        save()
+    }
+    private func save() { try? "\(fullAt.timeIntervalSince1970) \(every)".write(to: allowanceFile, atomically: true, encoding: .utf8) }
+    /// A new refill pace, with what's left kept as it is.
+    private func refill(every new: TimeInterval) {
+        guard abs(new - every) > 1 else { return }
+        let now = Date()
+        fullAt = now.addingTimeInterval(max(0, fullAt.timeIntervalSince(now)) * new / every)
+        every = new
+        save()
     }
 
     /// Coalesces bursts (a replayed backlog, several hooks at once) into one evaluation.
@@ -1879,7 +1893,10 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
         var news = say ? latest : Mind()
         news.mood = me.mood
         if sharing.state == .off { news.label = nil }
-        let flipped = news.busy != told.busy || lastSent == .distantPast || (!say && news.mood != told.mood)
+        // A turn starts with "thinking": give it a moment to get going, so the first word is about the work.
+        let hold = news.busy && !told.busy && news.doing == .think && news.label == nil && workingSince.map { now < $0.addingTimeInterval(firstWords) } == true
+        if hold { consider(workingSince!.addingTimeInterval(firstWords)) }
+        let flipped = !hold && (news.busy != told.busy || lastSent == .distantPast || (!say && news.mood != told.mood))
         let overdue = say && now.timeIntervalSince(lastSent) >= remind
         let retry = retryAt.map { now >= $0 } ?? false
         let must = flipped || overdue || retry
@@ -1948,7 +1965,7 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
         let counted = sentSince
         relay?.quota { [weak self] left, resets in
             guard let self else { return }
-            guard let left, let resets, resets > Date(), resets < Date().addingTimeInterval(2 * 86400) else { self.pace = 0; return }   // not ntfy, or it isn't saying
+            guard let left, let resets, resets > Date(), resets < Date().addingTimeInterval(2 * 86400) else { self.pace = 0; self.refill(every: allowance.every); return }   // not ntfy, or it isn't saying
             if let before = self.network, abs(before.resets.timeIntervalSince(resets)) < 300 {
                 self.shared = self.shared || before.left - left - counted > 2
                 self.compared = true
@@ -1960,8 +1977,10 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
             let enough = mine >= self.left(Date()) + span / allowance.every      // as much as my own allowance could spend by then
             self.pace = enough ? 0 : mine >= 2 ? span / (mine / 2) : .infinity
             self.tight = !enough && mine < span / tightBelow
+            // Plenty left: refill fast enough to spend my share by then, beyond what's in hand already.
+            self.refill(every: enough ? min(allowance.every, max(allowance.fastest, span / max(1, mine - self.left(Date())))) : allowance.every)
             if left == 0 { self.quietUntil = resets.addingTimeInterval(60); self.retryAt = self.quietUntil }
-            log("network: \(left) left, resets in \(Int(span / 60)) min, shared \(self.shared), pace \(self.pace.isInfinite ? "none" : String(Int(self.pace))), tight \(self.tight)")
+            log("network: \(left) left, resets in \(Int(span / 60)) min, shared \(self.shared), pace \(self.pace.isInfinite ? "none" : String(Int(self.pace))), tight \(self.tight), refill \(Int(self.every))")
             self.settle()
         }
     }

@@ -269,6 +269,7 @@ final class Twins: NSView {
         case act(Doing), catchIt, bump, greet, glad, toss, grab, five, yawn, stretch
         case hug, peek, bye, lookUp, nod            // meeting and parting
         case juggle, header, admire, seek           // what my twin gets up to on its own
+        case hum, scratch, hop, sneeze              // little things any of them does now and then
         case squabble
     }
     private struct Gesture { let move: Move, start: CFTimeInterval, length: Double; var cut: CFTimeInterval?; var aim = -1 }    // aim: the seat it's turned to
@@ -295,6 +296,7 @@ final class Twins: NSView {
     private func slow(_ who: Int) -> Double { who == 2 ? Twins.heavy : 1 }
     private func long(_ seconds: Double) -> Double { showOff ? seconds / 40 : seconds }
     private func rarely(_ oneIn: Int) -> Bool { Int.random(in: 0..<(showOff ? 2 : oneIn)) == 0 }
+    private let fidgets: [(Move, Double)] = [(.hum, 3.4), (.scratch, 2.4), (.hop, 1.5), (.sneeze, 2.0)]
     private func free(_ who: Int) -> Bool { awake[who] && gesture[who] == nil && now >= settled[who] }
     private func remember() { if awake[0], awake[1] { lastMet = Date() } }
     private var missed: Bool { lastMet.map { Date().timeIntervalSince($0) > (showOff ? 6 : 3600) } ?? true }   // it's been a while
@@ -564,7 +566,9 @@ final class Twins: NSView {
             nextTrick = now + long(.random(in: 100...260)); trick += 1
         } else if let who = rested.randomElement(), Double.random(in: 0..<1) < 1 / Double(max(2, up.count)) {    // three are no busier than two
             let sleepy = mood[who] == .weary ? rarely(3) : Calendar.current.component(.hour, from: Date()) < 5 && rarely(6)
-            if sleepy { start(.yawn, on: who, for: 1.9) } else { start(.act(doing[who]), on: who, for: doing[who].beat) }
+            if sleepy { start(.yawn, on: who, for: 1.9) }
+            else if rarely(6), let (fidget, length) = fidgets.randomElement() { start(fidget, on: who, for: length) }   // now and then, a fidget
+            else { start(.act(doing[who]), on: who, for: doing[who].beat) }
         }
         if let who = up.randomElement(), gesture[who] == nil, tweens["lid\(who)"] == nil { blink(who) }
         for who in up { relax(who) }
@@ -882,6 +886,21 @@ final class Twins: NSView {
             let look = key(Double(p), [(0, 0), (0.16, 1), (0.36, 1), (0.56, -1), (0.76, -1), (0.9, 0)]) * fade
             let sigh = pow(sin(.pi * max(0, min(1, (p - 0.78) / 0.22))), 2) * fade
             l.gazeX = 0.95 * look; l.lean = 1.3 * look; l.tilt = -3.5 * look; l.head = 0.8 * abs(look) - 0.6 * sigh; l.squint = 0.5 * sigh
+        case .hum:              // hums to itself, eyes closed, swaying to it
+            l.tilt = wave(2) * 5 * ease; l.lean = wave(2) * 0.5 * ease; l.squint = 0.7 * ease; l.smile = 0.8 * ease
+        case .scratch:          // scratches its head with one paw, puzzled
+            let side = who == 0 ? 0 : 1, rub = wave(5) * 0.35 * ease
+            if side == 0 { l.pawY.0 = 5.6 * ease; l.pawX.0 = (2.4 + rub) * ease } else { l.pawY.1 = 5.6 * ease; l.pawX.1 = (rub - 2.4) * ease }
+            l.tilt = 4 * toward * ease; l.gazeY = 0.5 * ease; l.gazeX = -0.4 * toward * ease
+        case .hop:              // a happy little hop: crouch, up, and a squashy landing
+            let crouch = pow(max(0, 1 - abs(p - 0.15) / 0.15), 2), up = pow(sin(.pi * max(0, min(1, (p - 0.25) / 0.4))), 2)
+            let land = pow(max(0, 1 - abs(p - 0.72) / 0.14), 2)
+            l.squash = (0.5 * crouch + 0.6 * land) * fade; l.head = 1.4 * up * fade; l.smile = ease; l.pawY = (1.2 * up * fade, 1.2 * up * fade)
+        case .sneeze:           // it builds and builds... and sneezes, and blinks it off
+            let build = smooth(p / 0.55) * (p < 0.6 ? 1 : 0), snap = pow(max(0, 1 - abs(p - 0.63) / 0.06), 1.5)
+            let after = smooth((p - 0.66) / 0.08) * (1 - smooth((p - 0.85) / 0.15))
+            l.head = (0.8 * build - 1.0 * snap) * fade; l.gazeY = 0.6 * build * fade; l.squint = (0.8 * build + snap) * fade
+            l.mouth = 0.5 * build * fade; l.squash = 0.7 * snap * fade; l.wide = 0.6 * after * fade
         case .nod, .squabble:
             break
         }
@@ -950,6 +969,19 @@ final class Twins: NSView {
             let look = key(Double(p), [(0, 0), (0.18, 1), (0.38, 1), (0.58, -1), (0.78, -1), (0.92, 0)]) * fade
             let sigh = pow(sin(.pi * max(0, min(1, (p - 0.8) / 0.2))), 2) * fade
             l.gazeX = 0.9 * look; l.lean = 0.8 * look; l.tilt = -2.5 * look; l.head = 0.5 * abs(look) - 0.5 * sigh; l.squint = 0.5 * sigh
+        case .hum:              // a low hum, eyes shut, swaying ever so slightly
+            l.tilt = wave(1.5) * 2.5 * ease; l.squint = 0.7 * ease; l.smile = 0.4 * ease; l.frown = 0.15 * ease
+        case .scratch:          // scratches the top of its head, one paw over the little ones, mulling it over
+            let rub = wave(4) * 0.4 * ease
+            if side > 0 { l.pawY.1 = 8.2 * ease; l.pawX.1 = (rub - 6.0) * ease } else { l.pawY.0 = 8.2 * ease; l.pawX.0 = (6.0 + rub) * ease }
+            l.gazeY = 0.4 * ease; l.frown = 0.5 * ease; l.tilt = 2 * side * ease
+        case .hop:              // not one for hopping: it shifts its weight, and settles back down with a thud
+            let lift = pow(sin(.pi * max(0, min(1, p / 0.6))), 2), thud = pow(max(0, 1 - abs(p - 0.68) / 0.12), 2)
+            l.head = 0.5 * lift * fade; l.squash = 0.5 * thud * fade; l.squint = 0.3 * thud * fade
+        case .sneeze:           // one enormous, slow sneeze
+            let build = smooth(p / 0.6) * (p < 0.65 ? 1 : 0), snap = pow(max(0, 1 - abs(p - 0.68) / 0.07), 1.5)
+            l.head = (0.6 * build - 0.9 * snap) * fade; l.gazeY = 0.5 * build * fade; l.squint = (0.7 * build + snap) * fade
+            l.mouth = 0.6 * build * fade; l.squash = 0.6 * snap * fade; l.frown = 0.3 * smooth((p - 0.72) / 0.1) * fade
         case .bump, .five, .hug, .juggle, .squabble:
             break
         }

@@ -6,7 +6,7 @@
 
 Two little creatures that hang out at the bottom of your Mac menu bar and share one braincell; they only appear 
 when both you and a friend are using Claude Code simultaneously, they act out what each Claude is doing, and 
-they nap when one of you stops. Works for pairs, or trios with a big brother in the back. Incredibly lightweight and memory efficient.
+they nap when one of you stops. Works for pairs, or trios. Incredibly lightweight and memory efficient.
 
 ## Quick Install (cleans itself up)
 
@@ -15,7 +15,7 @@ d=$(mktemp -d) && git clone --depth 1 https://github.com/Aeronyx/braincell "$d" 
 ```
 
 Required: Xcode Command Line Tools, macOS 13+, and Claude Code.
-That command prints the exact lines your friends should run (one for your twin, one for a big brother), with your unique pairing code already in it. 
+That command prints the exact lines your friends should run, with your unique pairing code already in it. 
 When a newer version is out, an "Update" line appears in the twins' menu; one click installs it.
 Running the same command again does the same, or with `new` after `install.sh` gets a fresh pairing code.
 To see the twins without pairing, try:

@@ -287,9 +287,11 @@ final class Twins: NSView {
     private var life: Timer?
     weak var button: NSView?    // the status item's button knows whether the menu bar is light or dark
     var edge: CGFloat? { didSet { if edge != oldValue { needsDisplay = true } } }      // where the menu bar slot ends, on the right
+    var inButton = false { didSet { if inButton != oldValue { needsDisplay = true } } } // living in the status item's button: its bottom edge is the ledge
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }   // clicks belong to the status item
     override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
+    override func viewDidChangeBackingProperties() { needsDisplay = true }    // moved to a display with sharper or coarser pixels
 
     private var now: CFTimeInterval { CACurrentMediaTime() }
     private func rest(_ who: Int) -> Double { (showOff ? 3 : 30) * (who == 2 ? 1.5 : 1) }    // how long a twin keeps still after acting out its work
@@ -567,7 +569,7 @@ final class Twins: NSView {
         } else if let who = rested.randomElement(), Double.random(in: 0..<1) < 1 / Double(max(2, up.count)) {    // three are no busier than two
             let sleepy = mood[who] == .weary ? rarely(3) : Calendar.current.component(.hour, from: Date()) < 5 && rarely(6)
             if sleepy { start(.yawn, on: who, for: 1.9) }
-            else if rarely(6), let (fidget, length) = fidgets.randomElement() { start(fidget, on: who, for: length) }   // now and then, a fidget
+            else if doing[who] != .wait, rarely(6), let (fidget, length) = fidgets.randomElement() { start(fidget, on: who, for: length) }   // now and then, a fidget (not while it's asking)
             else { start(.act(doing[who]), on: who, for: doing[who].beat) }
         }
         if let who = up.randomElement(), gesture[who] == nil, tweens["lid\(who)"] == nil { blink(who) }
@@ -897,7 +899,7 @@ final class Twins: NSView {
             let land = pow(max(0, 1 - abs(p - 0.72) / 0.14), 2)
             l.squash = (0.5 * crouch + 0.6 * land) * fade; l.head = 1.4 * up * fade; l.smile = ease; l.pawY = (1.2 * up * fade, 1.2 * up * fade)
         case .sneeze:           // it builds and builds... and sneezes, and blinks it off
-            let build = smooth(p / 0.55) * (p < 0.6 ? 1 : 0), snap = pow(max(0, 1 - abs(p - 0.63) / 0.06), 1.5)
+            let build = smooth(p / 0.55) * (1 - smooth((p - 0.57) / 0.05)), snap = pow(max(0, 1 - abs(p - 0.63) / 0.06), 1.5)
             let after = smooth((p - 0.66) / 0.08) * (1 - smooth((p - 0.85) / 0.15))
             l.head = (0.8 * build - 1.0 * snap) * fade; l.gazeY = 0.6 * build * fade; l.squint = (0.8 * build + snap) * fade
             l.mouth = 0.5 * build * fade; l.squash = 0.7 * snap * fade; l.wide = 0.6 * after * fade
@@ -979,7 +981,7 @@ final class Twins: NSView {
             let lift = pow(sin(.pi * max(0, min(1, p / 0.6))), 2), thud = pow(max(0, 1 - abs(p - 0.68) / 0.12), 2)
             l.head = 0.5 * lift * fade; l.squash = 0.5 * thud * fade; l.squint = 0.3 * thud * fade
         case .sneeze:           // one enormous, slow sneeze
-            let build = smooth(p / 0.6) * (p < 0.65 ? 1 : 0), snap = pow(max(0, 1 - abs(p - 0.68) / 0.07), 1.5)
+            let build = smooth(p / 0.6) * (1 - smooth((p - 0.61) / 0.06)), snap = pow(max(0, 1 - abs(p - 0.68) / 0.07), 1.5)
             l.head = (0.6 * build - 0.9 * snap) * fade; l.gazeY = 0.5 * build * fade; l.squint = (0.7 * build + snap) * fade
             l.mouth = 0.6 * build * fade; l.squash = 0.6 * snap * fade; l.frown = 0.3 * smooth((p - 0.72) / 0.1) * fade
         case .bump, .five, .hug, .juggle, .squabble:
@@ -1175,8 +1177,9 @@ final class Twins: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let dark = (button ?? self).effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        // The ledge: the menu bar's bottom edge, or a line level with the other icons. Below it is clipped away.
-        let ledge = (bounds.midY - Twins.ledgeBelowCenter) * pose["center"]!
+        // The ledge: the menu bar's bottom edge, or a line level with the other icons (in the button, its
+        // bottom edge is that line already). Below it is clipped away.
+        let ledge = inButton ? 0 : (bounds.midY - Twins.ledgeBelowCenter) * pose["center"]!
         let shift = NSAffineTransform()
         shift.translateX(by: 0, yBy: ledge)
         shift.concat()
@@ -1427,6 +1430,10 @@ struct Friend { var mind = Mind(); var stopped: Date?; var big = false; var hear
         inkWatch = item.button?.observe(\.effectiveAppearance) { [twins] _, _ in
             MainActor.assumeIsolated { twins.needsDisplay = true }
         }
+        // A display plugged in or out, or the menu bar's window moved or resized: sit down again.
+        for name in [NSWindow.didResizeNotification, NSWindow.didChangeScreenNotification, NSWindow.didChangeBackingPropertiesNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(seat), name: name, object: nil)
+        }
         seat()
     }
 
@@ -1434,16 +1441,21 @@ struct Friend { var mind = Mind(); var stopped: Date?; var big = false; var hear
     /// the menu bar on every Mac, so they can sit on its bottom edge with headroom above. Where the
     /// menu bar leaves room around each item (that window is wider than the button), the slot is
     /// exactly as wide as the twins. Where it doesn't, they keep a little room of their own.
-    private func seat() {
+    /// With more than one display, the menu bars on the others copy only the button, so then the
+    /// twins live in the button, level with the other icons, and every menu bar shows them alike.
+    static var oneScreen: Bool { NSScreen.screens.count < 2 }
+    @objc func seat() {
         guard let button = item.button else { return }
+        let content = button.window?.contentView
         var host: NSView = button
-        if let content = button.window?.contentView, content.bounds.height < 64, content.bounds.width < button.bounds.width + 64 {
+        if MenuBarItem.oneScreen, let content, content.bounds.height < 64, content.bounds.width < button.bounds.width + 64 {
             host = content      // only while that window is what it is today: one menu bar slot
         }
-        let pad: CGFloat = host.bounds.width >= button.bounds.width + 8 ? 0 : 2
+        let pad: CGFloat = (content?.bounds.width ?? 0) >= button.bounds.width + 8 ? 0 : 2
         if item.length != room + pad * 2 { item.length = room + pad * 2; log("slot: \(item.length) pt wide") }
-        if twins.superview !== host { host.addSubview(twins) }
+        if twins.superview !== host { host.addSubview(twins); log("twins: in the \(host === button ? "button" : "window")") }
         if twins.frame != host.bounds { twins.frame = host.bounds }
+        twins.inButton = host === button
         twins.edge = button.convert(button.bounds, to: host).maxX - pad
     }
 
@@ -1840,6 +1852,8 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         center.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        screensChanged()
         evaluate()
 
         version = (try? String(contentsOf: home.appendingPathComponent("version"), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
@@ -2047,6 +2061,13 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
 
     @objc private func willSleep() {
         if told.busy { told = Mind(); lastSent = Date(); spend(lastSent); relay?.send(told) }
+    }
+
+    /// Displays plugged in or out: with more than one, the twins sit level with the icons on all of
+    /// them, so where they sit is no longer up to the menu.
+    @objc private func screensChanged() {
+        placement.isEnabled = MenuBarItem.oneScreen
+        item.seat()
     }
 
     @objc private func didWake() {

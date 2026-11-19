@@ -13,7 +13,7 @@ let idleGrace: TimeInterval = 120     // stay "busy" this long after a turn ends
 let reannounce: TimeInterval = 1200   // repeat "busy" this often...
 let friendLease: TimeInterval = 2700  // ...and forget a friend's "busy" once it's this old
 let napFor: TimeInterval = 300        // whoever stops sleeps this long before leaving
-let squabbleOdds = 100_000            // the twins' squabble: one chance in this many each quiet moment together, so every few months
+let squabbleOdds = 70_000             // the twins' squabble: one chance in this many each quiet moment together, so every couple of months
 let longDay: TimeInterval = 4 * 3600  // after this much work in a day, a twin is worn out
 let detailEvery: TimeInterval = 180   // say what I'm doing at most this often
 let firstWords: TimeInterval = 20     // a turn's first "busy" waits this long for something more to say than "thinking"
@@ -270,6 +270,7 @@ final class Twins: NSView {
         case hug, peek, bye, lookUp, nod            // meeting and parting
         case juggle, header, admire, seek           // what my twin gets up to on its own
         case hum, scratch, hop, sneeze              // little things any of them does now and then
+        case whisper, hear, poke, poked, copycat    // little things just between the two little ones
         case squabble
     }
     private struct Gesture { let move: Move, start: CFTimeInterval, length: Double; var cut: CFTimeInterval?; var aim = -1 }    // aim: the seat it's turned to
@@ -521,6 +522,18 @@ final class Twins: NSView {
         if awake[who] { interrupt(who, with: .glad, for: 1.4) }
     }
 
+    /// Something just between the two little ones: a secret, a poke, or a game of copycat.
+    private func duet() {
+        let a = Int.random(in: 0..<2), b = 1 - a
+        switch Int.random(in: 0..<3) {
+        case 0: start(.whisper, on: a, for: 2.6); start(.hear, on: b, for: 2.6)
+        case 1: start(.poke, on: a, for: 1.9); start(.poked, on: b, for: 1.9)
+        default:
+            start(.copycat, on: a, for: 2.4)
+            after(0.45) { [weak self] in if let self, self.free(b) { self.start(.copycat, on: b, for: 2.4) } }   // a beat behind
+        }
+    }
+
     /// Another hour of working together.
     func highFive() {
         if company { owed = .five; settleUp() }
@@ -561,6 +574,8 @@ final class Twins: NSView {
             return
         } else if rested.contains(0), rested.contains(1), doing[0] == doing[1], doing[0] != .think, rarely(3) {
             for who in 0..<2 { start(.act(doing[who]), on: who, for: doing[who].beat) }     // same work: the little ones move as one
+        } else if rested.contains(0), rested.contains(1), rarely(40) {
+            duet()                                                                          // now and then, something just between the little ones
         } else if !company, rested == [mine], now > nextTrick, cellAt == CGFloat(mine), hop == nil, doing[mine] != .wait {
             let next = tricks[trick % tricks.count]                                         // on its own, it plays with the braincell
             start(next, on: mine, for: next == .juggle ? 3.2 : next == .seek ? 3.6 : 2.8)
@@ -698,7 +713,7 @@ final class Twins: NSView {
         } else if let taker, dozing {                                                                    // nobody throws in their sleep: another takes it
             guard free(taker) else { after(0.5) { [weak self] in self?.placeCell() }; return }
             grab(taker)
-        } else if let giver, let taker, giver < 2, taker < 2, !spot.urgent, awake[giver], free(taker), rarely(6) {   // and now and then one just takes it
+        } else if let giver, let taker, giver < 2, taker < 2, !spot.urgent, awake[giver], free(taker), rarely(5) {   // and now and then one just takes it
             grab(taker)
         } else if work.contains(.web) {                                                                  // surfing: it weaves across
             next.length = 1.1; next.height = 1.4; next.wobble = 0.9
@@ -708,7 +723,7 @@ final class Twins: NSView {
             start(.toss, on: giver, for: 0.55, aim: taker)
             next.start = now + 0.2 * slow(giver); next.length = 0.6; next.height = 0.9; next.caught = true
         } else {
-            next.header = taker != nil && rarely(8)                                                      // or it lands on a head and pops back up
+            next.header = taker != nil && rarely(6)                                                      // or it lands on a head and pops back up
         }
         if big, !grabbed { next.length *= 1.35; next.height += 0.8 }       // up to the big one, or down from it, is a longer way
         hop = next
@@ -765,7 +780,7 @@ final class Twins: NSView {
         for who in 0..<3 {
             guard let g = gesture[who], now - g.start >= g.length || g.cut.map({ now - $0 >= easing(who) }) == true else { continue }
             switch g.move {
-            case .act, .juggle, .header, .admire, .seek: acted[who] = now
+            case .act, .juggle, .header, .admire, .seek, .hum, .scratch, .hop, .sneeze, .whisper, .hear, .poke, .poked, .copycat: acted[who] = now
             default: break
             }
             gesture[who] = nil; ended = true
@@ -903,6 +918,23 @@ final class Twins: NSView {
             let after = smooth((p - 0.66) / 0.08) * (1 - smooth((p - 0.85) / 0.15))
             l.head = (0.8 * build - 1.0 * snap) * fade; l.gazeY = 0.6 * build * fade; l.squint = (0.8 * build + snap) * fade
             l.mouth = 0.5 * build * fade; l.squash = 0.7 * snap * fade; l.wide = 0.6 * after * fade
+        case .whisper:          // leans right in and tells the other something
+            l.lean = 1.6 * toward * ease; l.tilt = -5 * toward * ease; l.gazeX = 0.9 * toward * ease
+            l.mouth = 0.3 * pow(max(0, wave(4)), 2) * ease; l.squint = 0.25 * ease
+        case .hear:             // leans in to listen, eyes going wide, and then smiles
+            let wow = pow(sin(.pi * max(0, min(1, (p - 0.3) / 0.35))), 2)
+            l.lean = 0.7 * toward * ease; l.gazeX = 0.5 * toward * ease; l.tilt = -2 * toward * ease
+            l.wide = 0.7 * wow * fade; l.smile = smooth((p - 0.62) / 0.15) * ease
+        case .poke:             // pokes the other with its inner paw, and looks pleased with itself
+            let jab = pow(max(0, 1 - abs(p - 0.4) / 0.16), 2) * fade
+            l.pawY = inner(0.6 * ease + 1.4 * jab); l.pawX = inner(1.7 * toward * jab)
+            l.gazeX = 0.8 * toward * ease; l.smile = smooth((p - 0.5) / 0.15) * ease
+        case .poked:            // jumps, gives the other a look, and lets it go
+            let jolt = pow(max(0, 1 - abs(p - 0.45) / 0.09), 2) * fade, look = smooth((p - 0.5) / 0.12) * ease
+            l.head = 0.9 * jolt; l.wide = 0.8 * jolt; l.gazeX = 0.85 * toward * look
+            l.squint = 0.45 * look * (1 - smooth((p - 0.78) / 0.12)); l.smile = smooth((p - 0.78) / 0.12) * ease
+        case .copycat:          // tilts one way and then the other, the other copying a beat behind, and they grin
+            l.tilt = wave(1) * 6 * ease; l.gazeY = 0.3 * ease; l.gazeX = 0.4 * toward * ease; l.smile = smooth((p - 0.7) / 0.15) * ease
         case .nod, .squabble:
             break
         }
@@ -984,7 +1016,7 @@ final class Twins: NSView {
             let build = smooth(p / 0.6) * (1 - smooth((p - 0.61) / 0.06)), snap = pow(max(0, 1 - abs(p - 0.68) / 0.07), 1.5)
             l.head = (0.6 * build - 0.9 * snap) * fade; l.gazeY = 0.5 * build * fade; l.squint = (0.7 * build + snap) * fade
             l.mouth = 0.6 * build * fade; l.squash = 0.6 * snap * fade; l.frown = 0.3 * smooth((p - 0.72) / 0.1) * fade
-        case .bump, .five, .hug, .juggle, .squabble:
+        case .bump, .five, .hug, .juggle, .squabble, .whisper, .hear, .poke, .poked, .copycat:
             break
         }
         return l
@@ -1811,7 +1843,8 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
             log("no usable config.json in \(home.path); run install.sh")
             exit(0)
         }
-        let remove = NSMenuItem(title: "Remove Braincell…", action: #selector(remove), keyEquivalent: "")
+        version = (try? String(contentsOf: home.appendingPathComponent("version"), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+        let remove = NSMenuItem(title: "Remove Braincell… (v\(version))", action: #selector(remove), keyEquivalent: "")
         remove.target = self
         for (entry, flag) in [(placement, centeredFlag), (sharing, privateFlag), (shyness, stayFlag)] {
             entry.target = self
@@ -1856,7 +1889,6 @@ struct Config: Decodable { let server: String, room: String, id: String; var rol
         screensChanged()
         evaluate()
 
-        version = (try? String(contentsOf: home.appendingPathComponent("version"), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
         checkForUpdate()
         after(86400, repeats: true) { [weak self] in self?.checkForUpdate() }
     }

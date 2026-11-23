@@ -255,7 +255,10 @@ final class Twins: NSView {
     private var lastMet: Date?                      // when the two little ones were last awake together
 
     // The braincell. cellAt: 0 = over the left twin, 1 = over the right one, 0.5 = shared by them, 2 = up on the big one.
-    private struct Hop { var from, to: CGFloat, start: CFTimeInterval, length: Double, height: CGFloat, wobble: CGFloat = 0, caught = false, header = false }
+    // On its way over it arcs (lobbed, or blown with a wobble), skips, rolls off a tipped head, or goes from paw to paw;
+    // landing is what whoever gets it does then: catches it, fumbles it, or nods its thanks.
+    private enum Path { case arc, skip, roll, handed }
+    private struct Hop { var from, to: CGFloat, start: CFTimeInterval, length: Double, height: CGFloat, wobble: CGFloat = 0, header = false, path = Path.arc, landing: Move? }
     private var cellAt: CGFloat = 0
     private var hop: Hop?
     private var holder = 0      // who has it when nothing else decides: whoever switched tasks last
@@ -263,6 +266,7 @@ final class Twins: NSView {
     private var nextPass: CFTimeInterval = 0
     private var nextTrick: CFTimeInterval = 0, trick = 0    // on its own, my twin finds things to do: when, and which is next
     private var twinkle: CFTimeInterval = -60, nextTwinkle: CFTimeInterval = 0
+    private var sweep: CGFloat = 1                          // which way something drifting by overhead goes
 
     // A gesture is one short burst of movement by one twin.
     private enum Move: Equatable {
@@ -271,6 +275,8 @@ final class Twins: NSView {
         case juggle, header, admire, seek           // what my twin gets up to on its own
         case hum, scratch, hop, sneeze              // little things any of them does now and then
         case whisper, hear, poke, poked, copycat    // little things just between the two little ones
+        case pat, patted, stare, blinks, duck, startle, watch, clap, show, ooh, volley, returnIt, glance
+        case tip, blow, offer, take, nudge, beckon, fumble, thanks     // ways the little ones pass the braincell, and get it
         case squabble
     }
     private struct Gesture { let move: Move, start: CFTimeInterval, length: Double; var cut: CFTimeInterval?; var aim = -1 }    // aim: the seat it's turned to
@@ -301,6 +307,9 @@ final class Twins: NSView {
     private func rarely(_ oneIn: Int) -> Bool { Int.random(in: 0..<(showOff ? 2 : oneIn)) == 0 }
     private let fidgets: [(Move, Double)] = [(.hum, 3.4), (.scratch, 2.4), (.hop, 1.5), (.sneeze, 2.0)]
     private func free(_ who: Int) -> Bool { awake[who] && gesture[who] == nil && now >= settled[who] }
+    private var playing: Bool {     // something the little ones are doing with the braincell, or under it: it stays put till they're done
+        gesture.contains { g in g.map { $0.cut == nil && [.show, .volley, .duck, .fumble, .pat].contains($0.move) } ?? false }
+    }
     private func remember() { if awake[0], awake[1] { lastMet = Date() } }
     private var missed: Bool { lastMet.map { Date().timeIntervalSince($0) > (showOff ? 6 : 3600) } ?? true }   // it's been a while
     private var company: Bool { (0..<3).contains { $0 != mine && here[$0] } }
@@ -449,8 +458,8 @@ final class Twins: NSView {
         if on {
             settled[who] = now + 0.9 * slow(who); woke[who] = now
             wakeUp(who)
-            if Date().timeIntervalSince(slept[who]) > long(120) { start(.yawn, on: who, for: 1.9) }    // a long nap ends with a yawn
             for other in others { interrupt(other, with: other == 2 ? .nod : who == 2 ? .lookUp : .greet, for: 1.1, aim: who) }
+            if Date().timeIntervalSince(slept[who]) > long(120) { yawn(who) }                          // a long nap ends with a yawn
             if who < 2, others.contains(1 - who), missed { owed = .hug }                               // and a long time apart, with a hug
             scheduleLife()
             placeCell()
@@ -522,16 +531,41 @@ final class Twins: NSView {
         if awake[who] { interrupt(who, with: .glad, for: 1.4) }
     }
 
-    /// Something just between the two little ones: a secret, a poke, or a game of copycat.
+    /// Something just between the two little ones: a secret, a poke, copycat, a pat on the head, a
+    /// staring contest, peekaboo, something drifting by overhead, or patty-cake. If one of them has the
+    /// braincell to itself, it might show it off, or head it over for a quick volley.
     private func duet() {
         let a = Int.random(in: 0..<2), b = 1 - a
-        switch Int.random(in: 0..<3) {
-        case 0: start(.whisper, on: a, for: 2.6); start(.hear, on: b, for: 2.6)
-        case 1: start(.poke, on: a, for: 1.9); start(.poked, on: b, for: 1.9)
-        default:
+        let held = hop == nil && pose["perch"]! == 0 ? [0, 1].first(where: { CGFloat($0) == cellAt }) : nil
+        func together(_ one: Move, _ other: Move, for length: Double, by first: Int = a) {
+            start(one, on: first, for: length); start(other, on: 1 - first, for: length)
+        }
+        switch Int.random(in: 0..<(held == nil ? 8 : 10)) {
+        case 1: together(.poke, .poked, for: 1.9)
+        case 2:
             start(.copycat, on: a, for: 2.4)
             after(0.45) { [weak self] in if let self, self.free(b) { self.start(.copycat, on: b, for: 2.4) } }   // a beat behind
+        case 3 where hop == nil && pose["perch"]! == 0 && cellAt != 0.5:                                         // (whoever has the braincell reaches over: it's in the way of the other's paw)
+            together(.pat, .patted, for: 2.8, by: held ?? a)
+        case 4: together(.stare, .blinks, for: 3.6)
+        case 5 where hop == nil && (cellAt != 0.5 || pose["perch"]! > 0.5):                                     // (whoever ducks leaves the braincell up)
+            together(.duck, .startle, for: 3.4, by: held.map { 1 - $0 } ?? a)
+        case 6:
+            sweep = Bool.random() ? 1 : -1
+            start(.watch, on: a, for: 3.8)
+            after(0.35) { [weak self] in if let self, self.free(b) { self.start(.watch, on: b, for: 3.8) } }    // the other notices it a moment later
+        case 7 where pose["perch"]! == 0: together(.clap, .clap, for: 2.8)                                     // (not with the braincell resting on their paws)
+        case 8: together(.show, .ooh, for: 3.0, by: held!); twinkle = now + 0.9
+        case 9: together(.volley, .returnIt, for: 2.8, by: held!)
+        default: together(.whisper, .hear, for: 2.6)
         }
+    }
+
+    /// A yawn. The other little one, if it's up, sometimes catches it.
+    private func yawn(_ who: Int) {
+        start(.yawn, on: who, for: 1.9)
+        guard who < 2, here[1 - who], awake[1 - who], rarely(2) else { return }
+        start(.glance, on: 1 - who, for: 1.1); start(.yawn, on: 1 - who, for: 1.9)     // (the yawn waits for the glance)
     }
 
     /// Another hour of working together.
@@ -574,7 +608,7 @@ final class Twins: NSView {
             return
         } else if rested.contains(0), rested.contains(1), doing[0] == doing[1], doing[0] != .think, rarely(3) {
             for who in 0..<2 { start(.act(doing[who]), on: who, for: doing[who].beat) }     // same work: the little ones move as one
-        } else if rested.contains(0), rested.contains(1), rarely(40) {
+        } else if rested.contains(0), rested.contains(1), rarely(15) {
             duet()                                                                          // now and then, something just between the little ones
         } else if !company, rested == [mine], now > nextTrick, cellAt == CGFloat(mine), hop == nil, doing[mine] != .wait {
             let next = tricks[trick % tricks.count]                                         // on its own, it plays with the braincell
@@ -583,7 +617,7 @@ final class Twins: NSView {
             nextTrick = now + long(.random(in: 100...260)); trick += 1
         } else if let who = rested.randomElement(), Double.random(in: 0..<1) < 1 / Double(max(2, up.count)) {    // three are no busier than two
             let sleepy = mood[who] == .weary ? rarely(3) : Calendar.current.component(.hour, from: Date()) < 5 && rarely(6)
-            if sleepy { start(.yawn, on: who, for: 1.9) }
+            if sleepy { yawn(who) }
             else if doing[who] != .wait, rarely(6), let (fidget, length) = fidgets.randomElement() { start(fidget, on: who, for: length) }   // now and then, a fidget (not while it's asking)
             else { start(.act(doing[who]), on: who, for: doing[who].beat) }
         }
@@ -690,7 +724,7 @@ final class Twins: NSView {
     /// Sends the braincell where it belongs, once it has sat still for a while. How it travels
     /// depends on what they're up to, and it takes longer to get up to the big one and back.
     private func placeCell(tossedAfter toss: Double? = nil) {
-        guard scene == nil, tweens["alone"] == nil else { return }
+        guard scene == nil, tweens["alone"] == nil, !playing else { return }
         let spot = cellSpot()
         if (pose["perch"]! > 0.5) != spot.perched { move("perch", to: spot.perched ? 1 : 0, over: 0.7) }
         let stranded = cellAt == 0.5 ? !(here[0] && here[1]) : !here[Int(cellAt)]       // whoever had it has gone
@@ -699,7 +733,10 @@ final class Twins: NSView {
         let involved = Set([giver, taker].compactMap { $0 } + (cellAt == 0.5 || spot.at == 0.5 ? [0, 1] : []))
         let work = involved.map { doing[$0] }, big = giver == 2 || taker == 2
         let dozing = giver.map { here[$0] && !awake[$0] && pose["sink\($0)"]! > 0.9 } ?? false
-        var next = Hop(from: cellAt, to: spot.at, start: now, length: 0.9, height: 1.8)                 // an easy lob
+        var little = false                                                                              // from one little one to the other, both up
+        if let giver, let taker { little = giver < 2 && taker < 2 && awake[giver] }
+        if let giver, let taker, little, !spot.urgent, toss == nil, !free(giver) || !free(taker) { return }     // no hurry: once they both have a moment
+        var next = Hop(from: cellAt, to: spot.at, start: now, length: .random(in: 0.8...1.05), height: .random(in: 1.4...2.4), landing: nil)   // an easy lob, never quite the same twice
         var grabbed = false
         func grab(_ who: Int) {
             let length = 1.7 * slow(who)
@@ -707,23 +744,33 @@ final class Twins: NSView {
             next.start = now + 0.36 * length; next.length = 0.34 * length; next.height = 1.0; grabbed = true
         }
         if let toss {                                                                                    // flicked over on the way to sleep
-            next.start = now + toss; next.length = 0.7; next.height = 2.2; next.caught = true
+            next.start = now + toss; next.length = 0.7; next.height = 2.2; next.landing = .catchIt
         } else if let giver, !here[giver] {                                                              // left behind: it settles over whoever stayed
             next.length = 0.6; next.height = 0.5
         } else if let taker, dozing {                                                                    // nobody throws in their sleep: another takes it
             guard free(taker) else { after(0.5) { [weak self] in self?.placeCell() }; return }
             grab(taker)
-        } else if let giver, let taker, giver < 2, taker < 2, !spot.urgent, awake[giver], free(taker), rarely(5) {   // and now and then one just takes it
+        } else if let taker, little, !spot.urgent, rarely(5) {                                           // and now and then one just takes it
             grab(taker)
+        } else if let giver, let taker, little, !spot.urgent, rarely(2) {                                // or it goes over in one of a few ways:
+            switch Int.random(in: 0..<6) {
+            case 0: next.path = .skip; next.length = 1.1; next.height = 1.6                                                                                // it skips across by itself
+            case 1: start(.tip, on: giver, for: 1.6); next.path = .roll; next.start = now + 0.1; next.length = 1.1; next.height = 0.3; next.landing = .catchIt     // it rolls off a tipped head
+            case 2: start(.blow, on: giver, for: 1.6); next.start = now + 0.35; next.length = 2.0; next.height = 1.0; next.wobble = 0.45; next.landing = .catchIt  // it's blown over, like a bubble
+            case 3: start(.offer, on: giver, for: 2.4); start(.take, on: taker, for: 2.4); next.path = .handed; next.start = now + 0.29; next.length = 1.75      // it's handed over, paw to paw
+            case 4: start(.nudge, on: giver, for: 1.2); next.start = now + 0.46; next.length = 0.9; next.height = 2.6; next.landing = .catchIt                    // it's nudged over with a head
+            default: start(.beckon, on: taker, for: 1.4); next.start = now + 1.05; next.landing = .catchIt                                                       // it's asked for, and lobbed over
+            }
         } else if work.contains(.web) {                                                                  // surfing: it weaves across
             next.length = 1.1; next.height = 1.4; next.wobble = 0.9
         } else if work.contains(.plan) || work.contains(.team) {                                         // big ideas: a high, slow lob
             next.length = 1.3; next.height = 3.0
         } else if let giver, let taker, free(giver), work.contains(.run) || work.contains(.write) {      // busy hands: a flick and a catch
             start(.toss, on: giver, for: 0.55, aim: taker)
-            next.start = now + 0.2 * slow(giver); next.length = 0.6; next.height = 0.9; next.caught = true
+            next.start = now + 0.2 * slow(giver); next.length = 0.6; next.height = 0.9; next.landing = .catchIt
         } else {
-            next.header = taker != nil && rarely(6)                                                      // or it lands on a head and pops back up
+            next.header = taker != nil && rarely(6)                                                      // or it lands on a head and pops back up,
+            if little, !next.header { next.landing = rarely(10) ? .fumble : rarely(3) ? .thanks : nil }   // or it's nearly dropped, or there's a nod of thanks
         }
         if big, !grabbed { next.length *= 1.35; next.height += 0.8 }       // up to the big one, or down from it, is a longer way
         hop = next
@@ -757,9 +804,9 @@ final class Twins: NSView {
         }
         if let h = hop, now - h.start >= h.length {
             cellAt = h.to; hop = nil; lastHop = now
-            if let who = (0..<3).first(where: { CGFloat($0) == h.to }), h.caught || h.header, awake[who], gesture[who] == nil {
-                start(.catchIt, on: who, for: 0.4)
-                if h.header { hop = Hop(from: h.to, to: h.to, start: now, length: 0.4 * slow(who), height: -1.2) }      // down onto the head, and back up
+            if let who = (0..<3).first(where: { CGFloat($0) == h.to }), let landing = h.header ? Move.catchIt : h.landing, awake[who], gesture[who] == nil {
+                start(landing, on: who, for: landing == .fumble ? 1.6 : landing == .thanks ? 1.0 : 0.4)
+                if h.header { hop = Hop(from: h.to, to: h.to, start: now, length: 0.4 * slow(who), height: -1.2, landing: nil) }      // down onto the head, and back up
             }
             sparkle()
         }
@@ -780,7 +827,8 @@ final class Twins: NSView {
         for who in 0..<3 {
             guard let g = gesture[who], now - g.start >= g.length || g.cut.map({ now - $0 >= easing(who) }) == true else { continue }
             switch g.move {
-            case .act, .juggle, .header, .admire, .seek, .hum, .scratch, .hop, .sneeze, .whisper, .hear, .poke, .poked, .copycat: acted[who] = now
+            case .act, .juggle, .header, .admire, .seek, .hum, .scratch, .hop, .sneeze, .whisper, .hear, .poke, .poked, .copycat,
+                 .pat, .patted, .stare, .blinks, .duck, .startle, .watch, .clap, .show, .ooh, .volley, .returnIt: acted[who] = now
             default: break
             }
             gesture[who] = nil; ended = true
@@ -806,6 +854,8 @@ final class Twins: NSView {
         var wide: CGFloat = 0, frown: CGFloat = 0, derp: CGFloat = 0, daze: CGFloat = 0
         var reach: (x: CGFloat, y: CGFloat) = (0, 0)    // how far its inner paw has gone toward the braincell...
         var grip: CGFloat = 0                           // ...to lift it from below (0), or to hold its near side (1)
+        var pat: (x: CGFloat, y: CGFloat) = (0, 0)      // or over to the top of the other's head...
+        var tap: CGFloat = 0                            // ...and how far above it
         var toy: (x: CGFloat, y: CGFloat) = (0, 0)      // where its playing carries the braincell
     }
 
@@ -834,6 +884,7 @@ final class Twins: NSView {
         let upward: CGFloat = g.aim == 2 ? 1 : 0                                // looking to the big one, it looks up
         func wave(_ cycles: CGFloat) -> CGFloat { sin(p * cycles * 2 * .pi) }
         func inner(_ v: CGFloat) -> (CGFloat, CGFloat) { who == 0 ? (0, v) : (v, 0) }
+        func k(_ frames: (Double, CGFloat)...) -> CGFloat { key(Double(p), frames) * fade }     // keyframes through the gesture
         switch g.move {
         case .act(.think):      // gazes up, pondering
             l.gazeY = 0.45 * ease
@@ -935,6 +986,86 @@ final class Twins: NSView {
             l.squint = 0.45 * look * (1 - smooth((p - 0.78) / 0.12)); l.smile = smooth((p - 0.78) / 0.12) * ease
         case .copycat:          // tilts one way and then the other, the other copying a beat behind, and they grin
             l.tilt = wave(1) * 6 * ease; l.gazeY = 0.3 * ease; l.gazeX = 0.4 * toward * ease; l.smile = smooth((p - 0.7) / 0.15) * ease
+        case .glance:           // a look over at the other
+            l.gazeX = 0.85 * toward * ease
+        case .pat:              // reaches up and over, and pats the other on the head, twice
+            l.pat = (k((0.04, 0), (0.24, 1), (0.7, 1), (0.86, 0)), k((0, 0), (0.18, 1), (0.78, 1), (0.95, 0)))
+            l.tap = key(Double(p), [(0.24, 1.4), (0.36, 0), (0.45, 0.9), (0.54, 0), (0.68, 1.4)])
+            l.gazeX = 0.8 * toward * ease; l.gazeY = 0.25 * ease; l.lean = 0.5 * toward * ease; l.smile = ease
+        case .patted:           // shuts its eyes, smiles, and gives a little under each pat
+            l.head = -0.3 * k((0.3, 0), (0.36, 1), (0.43, 0), (0.48, 0), (0.54, 1), (0.61, 0))
+            l.squint = 0.85 * k((0.26, 0), (0.34, 1), (0.7, 1), (0.82, 0)); l.smile = k((0.3, 0), (0.4, 1), (0.82, 1), (0.95, 0))
+        case .stare:            // a staring contest: eyes locked, very still, till the other blinks; then a grin
+            let lock = k((0.04, 0), (0.16, 1), (0.72, 1), (0.88, 0)), won = k((0.64, 0), (0.72, 1), (0.88, 1), (1, 0))
+            l.gazeX = 0.95 * toward * lock; l.wide = 0.35 * lock; l.lean = 0.4 * toward * lock
+            l.smile = won; l.tilt = -3 * toward * won; l.head = 0.5 * k((0.64, 0), (0.74, 1), (0.84, 0))
+        case .blinks:           // ...it blinks first, and looks away, a little sheepish
+            let lock = k((0.04, 0), (0.16, 1), (0.6, 1), (0.68, 0)), away = k((0.64, 0), (0.74, 1), (0.9, 1), (1, 0))
+            l.gazeX = (0.95 * lock - 0.45 * away) * toward; l.gazeY = -0.35 * away; l.lean = 0.4 * toward * lock
+            l.wide = k((0.04, 0), (0.16, 0.3), (0.5, 0.35), (0.58, 0.7), (0.61, 0)); l.squint = k((0.58, 0), (0.61, 1), (0.65, 0))
+            l.smile = 0.6 * away; l.head = -0.3 * away
+        case .duck:             // peekaboo: down under the ledge, a moment out of sight, and back up
+            l.head = k((0.06, 0), (0.2, -12), (0.5, -12), (0.58, 1.1), (0.68, 0))
+            l.wide = 0.8 * k((0.54, 0), (0.58, 1), (0.68, 1), (0.78, 0)); l.mouth = 0.45 * k((0.55, 0), (0.59, 1), (0.66, 1), (0.72, 0))
+            l.gazeX = 0.8 * toward * k((0.5, 0), (0.58, 1), (0.88, 1), (1, 0)); l.smile = k((0.66, 0), (0.76, 1), (0.9, 1), (1, 0))
+        case .startle:          // ...the other leans over to see where it went, jumps when it pops up, and giggles
+            let look = k((0.12, 0), (0.26, 1), (0.5, 1), (0.58, 0)), jump = k((0.53, 0), (0.58, 1), (0.7, 0))
+            l.lean = (1.0 * look - 0.4 * jump) * toward; l.tilt = -6 * toward * look; l.gazeX = 0.9 * toward * look; l.gazeY = -0.45 * look
+            l.head = 0.9 * jump + 0.25 * pow(sin(.pi * 3 * max(0, p - 0.72) / 0.2), 2) * k((0.72, 0), (0.76, 1), (0.88, 1), (0.92, 0))
+            l.wide = 0.9 * k((0.53, 0), (0.58, 1), (0.72, 0.6), (0.82, 0)); l.smile = k((0.66, 0), (0.76, 1), (0.9, 1), (1, 0))
+        case .watch:            // something drifts by overhead: it follows it across, then looks at the other
+            let up = k((0.04, 0), (0.16, 1), (0.76, 1), (0.86, 0)), along = key(Double(p), [(0.08, -1), (0.8, 1)]) * sweep
+            let after = k((0.78, 0), (0.86, 1), (0.95, 1), (1, 0))
+            l.gazeX = 0.9 * along * up + 0.8 * toward * after; l.gazeY = (0.7 + 0.12 * sin(p * 6 * .pi)) * up
+            l.tilt = -4 * along * up; l.head = 0.3 * up; l.smile = after
+        case .clap:             // patty-cake: their inner paws come up and meet, three times
+            let hands = k((0.06, 0), (0.22, 1), (0.82, 1), (0.96, 0))
+            let meet = [0.36, 0.52, 0.68].map { pow(max(0, 1 - abs(p - $0) / 0.08), 2) }.reduce(0, +)
+            l.pawY = inner((2.6 + 0.3 * meet) * hands); l.pawX = inner((0.8 * meet - 0.8) * toward * hands)
+            l.head = 0.25 * meet * hands; l.smile = hands; l.gazeX = 0.5 * toward * hands
+        case .show:             // holds the braincell out on a paw, for the other to see
+            l.toy = (5.8 * toward * ease, -(3.2 + twin[who].top - twin[0].top) * ease * ease)
+            l.pawY = inner(4.4 * ease); l.pawX = inner(-0.6 * toward * ease)
+            l.gazeX = 0.8 * toward * ease; l.tilt = -3 * toward * ease; l.smile = smooth((p - 0.35) / 0.15) * ease
+        case .ooh:              // leans in for a look at it, eyes wide: ooh
+            l.lean = 0.8 * toward * ease; l.tilt = -4 * toward * ease; l.gazeX = 0.5 * toward * ease; l.gazeY = -0.25 * ease
+            l.wide = 0.6 * k((0.25, 0), (0.4, 1), (0.7, 1), (0.85, 0)); l.mouth = 0.4 * k((0.3, 0), (0.42, 1), (0.6, 1), (0.7, 0))
+            l.smile = k((0.62, 0), (0.75, 1), (0.9, 1), (1, 0))
+        case .volley:           // heads the braincell over to the other, and it comes back
+            let flight = max(0, min(1, (p - 0.12) / 0.32)), home = max(0, min(1, (p - 0.48) / 0.32)), there = smooth(flight) - smooth(home)
+            l.toy = ((place(1 - who) - place(who)) * there * fade,
+                     (2.8 * (sin(.pi * flight) + sin(.pi * home)) + (twin[1 - who].top - twin[who].top) * there - 1.2 * key(Double(p), [(0.4, 0), (0.45, 1), (0.5, 0)])) * fade)
+            l.head = k((0, 0), (0.1, -0.4), (0.16, 0.4), (0.26, 0)) - 0.5 * k((0.74, 0), (0.8, 1), (0.9, 0))
+            l.gazeX = 0.8 * toward * there * ease; l.gazeY = 0.35 * ease; l.smile = k((0.82, 0), (0.9, 1), (1, 0))
+        case .returnIt:         // ...a bump of its head sends it back
+            l.head = k((0.38, 0), (0.44, -0.5), (0.5, 0.45), (0.6, 0)); l.gazeY = 0.45 * k((0.15, 0), (0.35, 1), (0.6, 1), (0.8, 0))
+            l.gazeX = -0.4 * toward * k((0.25, 0), (0.4, 1), (0.5, 1), (0.65, 0)); l.smile = k((0.82, 0), (0.9, 1), (1, 0))
+        case .tip:              // tips its head toward the other, and the braincell rolls off
+            let over = k((0, 0), (0.25, 1), (0.6, 1), (0.9, 0))
+            l.tilt = -9 * toward * over; l.gazeX = 0.6 * toward * over; l.gazeY = 0.25 * over
+        case .blow:             // a breath in, and it blows the braincell over like a bubble
+            let puff = k((0.15, 0), (0.28, 1), (0.6, 1), (0.75, 0))
+            l.head = 0.3 * k((0, 0), (0.14, 1), (0.28, 0)); l.lean = toward * k((0, 0), (0.14, -0.3), (0.3, 0.4), (0.6, 0.4), (0.8, 0))
+            l.mouth = 0.4 * puff; l.squint = 0.3 * puff; l.gazeX = 0.6 * toward * ease
+        case .offer:            // holds the braincell out on its paw, till the other takes it
+            l.reach = (k((0.12, 0), (0.3, 1), (0.55, 1), (0.7, 0)), k((0.1, 0), (0.26, 1), (0.57, 1), (0.74, 0)))
+            l.gazeX = 0.7 * toward * ease; l.smile = 0.6 * ease
+        case .take:             // takes it by the side, and lets it float home
+            l.reach = (k((0.32, 0), (0.46, 1), (0.58, 1), (0.74, 0)), k((0.3, 0), (0.44, 1), (0.6, 1), (0.76, 0))); l.grip = 1
+            l.gazeX = 0.5 * toward * k((0.25, 0), (0.4, 1), (0.55, 1), (0.75, 0)); l.smile = k((0.7, 0), (0.85, 1), (1, 0))
+        case .nudge:            // bumps the braincell over with its head
+            l.head = k((0, 0), (0.25, -0.5), (0.42, 0.9), (0.75, 0)); l.gazeX = 0.6 * toward * ease; l.gazeY = 0.3 * ease
+        case .beckon:           // asks for the braincell with a curl of its paw
+            let up = k((0, 0), (0.2, 1), (0.75, 1), (0.92, 0)), curl = pow(sin(.pi * 2 * max(0, min(1, (p - 0.2) / 0.55))), 2)
+            l.pawY = inner(2.4 * up); l.pawX = inner((0.6 - 1.0 * curl) * toward * up); l.gazeX = 0.8 * toward * ease; l.smile = 0.5 * ease
+        case .fumble:           // nearly drops it: it wobbles about, a paw steadies it, and phew
+            let shake = (1 - smooth(p / 0.7)) * fade, wobble = sin(p * 5 * .pi)
+            l.toy = (-toward * 1.3 * wobble * shake, 0.8 * abs(wobble) * shake)
+            l.reach = (k((0.25, 0), (0.42, 1), (0.68, 1), (0.86, 0)), k((0.22, 0), (0.4, 1), (0.7, 1), (0.88, 0)))
+            l.wide = 0.8 * k((0, 0), (0.08, 1), (0.5, 1), (0.65, 0)); l.gazeY = 0.5 * ease
+            l.smile = k((0.68, 0), (0.8, 1), (1, 0)); l.squint = 0.4 * k((0.68, 0), (0.8, 1), (1, 0)); l.head = -0.3 * k((0.7, 0), (0.82, 1), (1, 0))
+        case .thanks:           // a little nod to whoever passed it
+            l.head = -0.45 * bell; l.gazeX = 0.8 * toward * ease; l.smile = 0.7 * ease
         case .nod, .squabble:
             break
         }
@@ -1016,8 +1147,9 @@ final class Twins: NSView {
             let build = smooth(p / 0.6) * (1 - smooth((p - 0.61) / 0.06)), snap = pow(max(0, 1 - abs(p - 0.68) / 0.07), 1.5)
             l.head = (0.6 * build - 0.9 * snap) * fade; l.gazeY = 0.5 * build * fade; l.squint = (0.7 * build + snap) * fade
             l.mouth = 0.6 * build * fade; l.squash = 0.6 * snap * fade; l.frown = 0.3 * smooth((p - 0.72) / 0.1) * fade
-        case .bump, .five, .hug, .juggle, .squabble, .whisper, .hear, .poke, .poked, .copycat:
-            break
+        case .bump, .five, .hug, .juggle, .squabble, .whisper, .hear, .poke, .poked, .copycat, .glance, .pat, .patted, .stare, .blinks, .duck, .startle,
+             .watch, .clap, .show, .ooh, .volley, .returnIt, .tip, .blow, .offer, .take, .nudge, .beckon, .fumble, .thanks:
+            break       // just between the little ones
         }
         return l
     }
@@ -1245,11 +1377,19 @@ final class Twins: NSView {
         func float(_ i: Int) -> CGFloat { twin[i].top - sunk(i) + limb[i].head * twin[i].scale + 3.1 }
         var lane = cellAt == 2 ? 0.5 : cellAt, lofty: CGFloat = cellAt == 2 ? 1 : 0, arc: CGFloat = 0    // lane: between the little ones. lofty: 1 = up on the big one
         if let h = hop {
-            let u = CGFloat(min(1, max(0, (now - h.start) / h.length))), e = u * u * (3 - 2 * u)
+            let u = CGFloat(min(1, max(0, (now - h.start) / h.length)))
+            var e = u * u * (3 - 2 * u)
+            arc = sin(.pi * u) * (h.height + sin(.pi * u * 4) * h.wobble)
+            switch h.path {
+            case .arc: break
+            case .skip: e = (u + e) / 2; arc = h.height * (u < 0.6 ? sin(.pi * u / 0.6) : 0.45 * sin(.pi * (u - 0.6) / 0.4))    // a hop, and a smaller one
+            case .roll: e = u * u * (2 - u)                                                                                      // slow off the head, then away
+            case .handed:                                                                                                         // held out between them, lower down, then taken
+                e = key(Double(u), [(0, 0), (0.3, 0.45), (0.55, 0.45), (1, 1)]); arc = -1.5 * key(Double(u), [(0, 0), (0.3, 1), (0.55, 1), (1, 0)])
+            }
             let from = h.from == 2 ? (h.to == 2 ? 0.5 : h.to) : h.from, to = h.to == 2 ? from : h.to
             lane = from + (to - from) * e
             lofty = (h.from == 2 ? 1 : 0) * (1 - e) + (h.to == 2 ? 1 : 0) * e
-            arc = sin(.pi * u) * (h.height + sin(.pi * u * 4) * h.wobble)
         }
         let low = NSPoint(x: at[0] + (at[1] - at[0]) * lane, y: float(0) + (float(1) - float(0)) * lane), high = NSPoint(x: at[2], y: float(2))
         var toy = CGPoint.zero
@@ -1346,6 +1486,11 @@ final class Twins: NSView {
                 if n == inner {     // from below, or by its near side
                     let hold = NSPoint(x: cellSpot.midX + (n == 1 ? -1 : 1) * l.grip * (cellSpot.width / 2 + 0.3 * s), y: cellSpot.midY - 2.6 * s + 2.3 * s * l.grip)
                     x += (hold.x - x) * l.reach.x; y += (hold.y - y) * l.reach.y
+                    if i < 2, l.pat.y > 0 {     // or onto the near side of the other's head, with a thin gap around it so it stands out there
+                        let o = 1 - i, top = NSPoint(x: ox + at[o] + limb[o].lean + (o == 0 ? 0.8 : -0.8), y: twin[o].top + drop(o) + 1.1 + l.tap)
+                        x += (top.x - x) * l.pat.x; y += (top.y - y) * l.pat.y
+                        clear([NSBezierPath(ovalIn: oval(x, y, 2.1, 1.85))])
+                    }
                 }
                 NSBezierPath(ovalIn: oval(x, y, 1.6 * s, 1.35 * s)).fill()
             }

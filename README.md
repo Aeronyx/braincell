@@ -38,7 +38,7 @@ your creature always stays out, even when alone.
 
 ## Is it safe?
 
-This is ~2,600 lines, nearly all Swift, that you can easily read (or ask your Claude to read) in one sitting, 
+This is ~2,800 lines, nearly all Swift, that you can easily read (or ask your Claude to read) in one sitting, 
 compiled locally. No account, analytics, or admin rights; just two creatures who crave company.
 
 - **All your prompts, code, and commands never leave your Mac.**

@@ -289,10 +289,10 @@ final class Twins: NSView {
     private var settled: [CFTimeInterval] = [0, 0, 0]   // a twin that just arrived or woke takes a moment before its next gesture
     private var owed: Move?                             // something they do together, once each of them has a moment
 
-    // Little things that drift away from a twin: a sleeper's z, a bead of sweat, a whistled note. drift: how far
+    // Little things that drift away from a twin: a sleeper's z, a bead of sweat, a whistled note, a heart. drift: how far
     // it goes sideways. gone: how far through its life it's snuffed out (caught, by whoever's paw `by` is).
     private struct Wisp {
-        enum Kind { case z, sweat, note }
+        enum Kind { case z, sweat, note, heart }
         let who: Int, kind: Kind, x, y, side, size: CGFloat, start: CFTimeInterval
         var drift: CGFloat = 1.4, gone: CGFloat = 1, by = -1
     }
@@ -457,6 +457,7 @@ final class Twins: NSView {
             if awake[0], awake[1] {
                 let hello: Move = missed ? .hug : .bump
                 for who in 0..<2 { start(hello, on: who, for: hello == .hug ? 2.4 : 0.6) }
+                if hello == .hug { heart(0, between: true, at: 0.4) }
             } else if let who = [0, 1].first(where: { awake[$0] }), newcomer == nil || newcomer == who {
                 start(.peek, on: who, for: 1.4)
             }
@@ -499,6 +500,9 @@ final class Twins: NSView {
             }
             dropOff(who, after: wait)
             placeCell(tossedAfter: toss)
+            if who < 2, here[1 - who], awake[1 - who], rarely(2) {         // the other, if it's up, sometimes watches it nod off, and smiles
+                after(wait + 1.2) { [weak self] in if let self, !self.awake[who], self.free(1 - who) { self.start(.aww, on: 1 - who, for: 3.4) } }
+            }
         }
     }
 
@@ -603,7 +607,7 @@ final class Twins: NSView {
     private func tend(_ who: Int) {
         let o = 1 - who
         switch Int.random(in: 0..<3) {
-        case 0: start(.stroke, on: who, for: 3.4); start(.dream, on: o, for: 3.4)
+        case 0: start(.stroke, on: who, for: 3.4); start(.dream, on: o, for: 3.4); heart(o, at: 0.5)
         case 1:
             start(.prod, on: who, for: 3.4); start(.jostled, on: o, for: 3.4)
             if let g = gesture[o] {     // a z, as if to say no
@@ -634,7 +638,7 @@ final class Twins: NSView {
             }
             if up { start(.ears, on: o, for: 3.8) }
         default:
-            start(.slump, on: who, for: 7); start(.prop, on: o, for: 7)
+            start(.slump, on: who, for: 7); start(.prop, on: o, for: 7); heart(o, between: true, at: 0.42)
         }
     }
 
@@ -649,6 +653,15 @@ final class Twins: NSView {
         let way: CGFloat = who == 0 ? -1 : 1, from = zFrom(1 - who, way), u = Twins.caught
         let x = from.x + way * 4 * u + sin(u * 2 * .pi) * 0.4, y = from.y + 5 * u     // (as the z goes: see paint)
         return (x - (place(who) - way * twin[who].paw), y - 0.7)
+    }
+
+    /// A little heart floats up, partway through what a twin is doing: from beside it, or from between the
+    /// two little ones, over where their heads meet.
+    private func heart(_ who: Int, between: Bool = false, at fraction: Double) {
+        guard let g = gesture[who] else { return }
+        let side: CGFloat = who == 0 ? -1 : 1, t = twin[who]
+        let x = between ? (place(0) + place(1)) / 2 : place(who) + side * (t.width / 2 + 0.6), y = between ? twin[1].top + 0.4 : t.top - Twins.doze * pose["sink\(who)"]! - 0.6
+        wisps.append(Wisp(who: who, kind: .heart, x: x, y: y, side: between ? 0 : side, size: 1, start: g.start + fraction * g.length, drift: 1))
     }
 
     /// A whistled tune: two notes float up and away.
@@ -675,6 +688,7 @@ final class Twins: NSView {
         owed = nil
         if up.contains(0), up.contains(1) {
             for who in 0..<2 { start(move, on: who, for: move == .hug ? 2.4 : 1.3) }
+            if move == .hug { heart(0, between: true, at: 0.4) }
         } else if let who = up.first(where: { $0 < 2 }) {
             start(move == .five ? .glad : .lookUp, on: who, for: 1.4)
         }
@@ -1764,6 +1778,15 @@ final class Twins: NSView {
                 dot.transform(using: put); path.transform(using: put)
                 path.lineWidth = 0.55; path.lineCapStyle = .round
                 shade.setFill(); dot.fill(); shade.setStroke(); path.stroke()
+            case .heart:        // a heart, in the braincell's colour, floats up, swaying
+                let x = ox + w.x + w.side * w.drift * p + sin(p * 2 * .pi) * 0.5, y = w.y + 4.4 * p, z = 0.75 + 0.25 * min(1, p * 4)
+                path.move(to: NSPoint(x: x, y: y - 1.15 * z))
+                path.curve(to: NSPoint(x: x - 1.25 * z, y: y + 0.45 * z), controlPoint1: NSPoint(x: x - 0.45 * z, y: y - 0.55 * z), controlPoint2: NSPoint(x: x - 1.25 * z, y: y - 0.15 * z))
+                path.curve(to: NSPoint(x: x, y: y + 0.55 * z), controlPoint1: NSPoint(x: x - 1.25 * z, y: y + 1.25 * z), controlPoint2: NSPoint(x: x - 0.2 * z, y: y + 1.25 * z))
+                path.curve(to: NSPoint(x: x + 1.25 * z, y: y + 0.45 * z), controlPoint1: NSPoint(x: x + 0.2 * z, y: y + 1.25 * z), controlPoint2: NSPoint(x: x + 1.25 * z, y: y + 1.25 * z))
+                path.curve(to: NSPoint(x: x, y: y - 1.15 * z), controlPoint1: NSPoint(x: x + 1.25 * z, y: y - 0.15 * z), controlPoint2: NSPoint(x: x + 0.45 * z, y: y - 0.55 * z))
+                path.close()
+                accent.withAlphaComponent(fade).setFill(); path.fill()
             }
         }
     }

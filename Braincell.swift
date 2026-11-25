@@ -274,6 +274,10 @@ final class Twins: NSView {
         case hug, peek, bye, lookUp, nod            // meeting and parting
         case juggle, header, admire, seek           // what my twin gets up to on its own
         case hum, scratch, hop, sneeze              // little things any of them does now and then
+        case hiccup, slowBlink, peer, doze
+        case whistle, polish, balance               // ...and that only the little ones do
+        case stroke, prod, catchZ, aww, ears, prop  // what the little one that's up does for the one asleep beside it...
+        case dream, jostled, snore, slump           // ...and what that one does in its sleep
         case whisper, hear, poke, poked, copycat    // little things just between the two little ones
         case pat, patted, stare, blinks, duck, startle, watch, clap, show, ooh, volley, returnIt, glance
         case tip, blow, offer, take, nudge, beckon, fumble, thanks     // ways the little ones pass the braincell, and get it
@@ -285,8 +289,14 @@ final class Twins: NSView {
     private var settled: [CFTimeInterval] = [0, 0, 0]   // a twin that just arrived or woke takes a moment before its next gesture
     private var owed: Move?                             // something they do together, once each of them has a moment
 
-    // Little things that drift away from a twin: a sleeper's z, a bead of sweat.
-    private struct Wisp { let who: Int, sweat: Bool, x, y, side, size: CGFloat, start: CFTimeInterval }
+    // Little things that drift away from a twin: a sleeper's z, a bead of sweat, a whistled note. drift: how far
+    // it goes sideways. gone: how far through its life it's snuffed out (caught, by whoever's paw `by` is).
+    private struct Wisp {
+        enum Kind { case z, sweat, note }
+        let who: Int, kind: Kind, x, y, side, size: CGFloat, start: CFTimeInterval
+        var drift: CGFloat = 1.4, gone: CGFloat = 1, by = -1
+    }
+    private static let caught: CGFloat = 0.63       // where a z is caught, through its life
     private var wisps: [Wisp] = []
     private var nextWisp: [CFTimeInterval] = [0, 0, 0]
 
@@ -305,16 +315,26 @@ final class Twins: NSView {
     private func slow(_ who: Int) -> Double { who == 2 ? Twins.heavy : 1 }
     private func long(_ seconds: Double) -> Double { showOff ? seconds / 40 : seconds }
     private func rarely(_ oneIn: Int) -> Bool { Int.random(in: 0..<(showOff ? 2 : oneIn)) == 0 }
-    private let fidgets: [(Move, Double)] = [(.hum, 3.4), (.scratch, 2.4), (.hop, 1.5), (.sneeze, 2.0)]
+    /// Little things a twin does now and then, and how long each takes. Only the little ones whistle,
+    /// and only one with the braincell to itself can polish it, or balance it.
+    private func fidgets(_ who: Int) -> [(Move, Double)] {
+        var all: [(Move, Double)] = [(.hum, 3.4), (.scratch, 2.4), (.hop, 1.5), (.sneeze, 2.0), (.hiccup, 2.6), (.slowBlink, 3.0), (.peer, 3.0)]
+        if who < 2 { all.append((.whistle, 3.4)) }
+        if who < 2, hop == nil, pose["perch"]! == 0, cellAt == CGFloat(who), !playing { all += [(.polish, 3.0), (.balance, 3.4)] }
+        return all
+    }
     private func free(_ who: Int) -> Bool { awake[who] && gesture[who] == nil && now >= settled[who] }
     private var playing: Bool {     // something the little ones are doing with the braincell, or under it: it stays put till they're done
-        gesture.contains { g in g.map { $0.cut == nil && [.show, .volley, .duck, .fumble, .pat].contains($0.move) } ?? false }
+        gesture.contains { g in g.map { $0.cut == nil && [.show, .volley, .duck, .fumble, .pat, .polish, .balance].contains($0.move) } ?? false }
     }
     private func remember() { if awake[0], awake[1] { lastMet = Date() } }
     private var missed: Bool { lastMet.map { Date().timeIntervalSince($0) > (showOff ? 6 : 3600) } ?? true }   // it's been a while
     private var company: Bool { (0..<3).contains { $0 != mine && here[$0] } }
     private var soloWidth: CGFloat { mine == 2 ? Twins.bigSoloWidth : Twins.soloWidth }
-    private var tricks: [Move] { mine == 2 ? [.seek, .admire, .header] : [.juggle, .header, .admire, .seek] }   // the big one doesn't juggle
+    private var tricks: [(Move, Double)] {      // the big one doesn't juggle, or fuss over its braincell
+        mine == 2 ? [(.seek, 3.6), (.admire, 2.8), (.header, 2.8)]
+                  : [(.juggle, 3.2), (.header, 2.8), (.polish, 3.0), (.admire, 2.8), (.balance, 3.4), (.seek, 3.6)]
+    }
 
     /// Where each twin stands. On its own, mine sits further over: in the middle of the narrower slot the menu bar gives it.
     private func place(_ who: Int) -> CGFloat {
@@ -364,7 +384,8 @@ final class Twins: NSView {
             }
             lower(who, after: 0)
         }
-        if !parts.isEmpty, !company { owed = nil; trick = tricks.firstIndex(of: .seek)! }      // (on its own, the first thing it does is look for them)
+        for who in 0..<3 where want[who] && !awake[who] && !parts.isEmpty { calm(who) }        // (a sleeper slumped on whoever's gone sits back up)
+        if !parts.isEmpty, !company { owed = nil; trick = tricks.firstIndex { $0.0 == .seek }! }  // (on its own, the first thing it does is look for them)
         if !parts.isEmpty { after(0.6) { [weak self] in self?.placeCell() } }                  // a braincell left over someone who's gone settles elsewhere
         if want[0], want[1] { let ready = max(settled[0], settled[1]); settled[0] = ready; settled[1] = ready }    // so they can greet each other as one
         if pose["alone"]! != lone {
@@ -457,6 +478,7 @@ final class Twins: NSView {
         let others = (0..<3).filter { $0 != who && here[$0] && awake[$0] }
         if on {
             settled[who] = now + 0.9 * slow(who); woke[who] = now
+            calm(who)                                                                                   // whatever it was doing in its sleep
             wakeUp(who)
             for other in others { interrupt(other, with: other == 2 ? .nod : who == 2 ? .lookUp : .greet, for: 1.1, aim: who) }
             if Date().timeIntervalSince(slept[who]) > long(120) { yawn(who) }                          // a long nap ends with a yawn
@@ -568,6 +590,77 @@ final class Twins: NSView {
         start(.glance, on: 1 - who, for: 1.1); start(.yawn, on: 1 - who, for: 1.9)     // (the yawn waits for the glance)
     }
 
+    /// The little one beside this one, if it's fast asleep (not out of usage) and keeping still.
+    private func sleeper(beside who: Int) -> Int? {
+        guard who < 2, here[1 - who], !awake[1 - who] else { return nil }
+        let o = 1 - who
+        guard mood[o] != .spent, gesture[o] == nil, pose["sink\(o)"]! > 0.9, tweens["sink\(o)"] == nil, Date().timeIntervalSince(slept[o]) > long(20) else { return nil }
+        return o
+    }
+
+    /// Something for the little one asleep beside it: a soft stroke of its head (it smiles in its
+    /// sleep), a prod in the side (it sleeps on), or one of its z's, caught.
+    private func tend(_ who: Int) {
+        let o = 1 - who
+        switch Int.random(in: 0..<3) {
+        case 0: start(.stroke, on: who, for: 3.4); start(.dream, on: o, for: 3.4)
+        case 1:
+            start(.prod, on: who, for: 3.4); start(.jostled, on: o, for: 3.4)
+            if let g = gesture[o] {     // a z, as if to say no
+                let side: CGFloat = o == 0 ? -1 : 1, from = zFrom(o, side)
+                wisps.append(Wisp(who: o, kind: .z, x: from.x, y: from.y, side: side, size: 1, start: g.start + 0.55 * g.length))
+            }
+        default:
+            start(.catchZ, on: who, for: 3.6)
+            guard let g = gesture[who], g.move == .catchZ else { return }
+            let way: CGFloat = who == 0 ? -1 : 1, from = zFrom(o, way)       // this z drifts its way
+            wisps.append(Wisp(who: o, kind: .z, x: from.x, y: from.y, side: way, size: 1, start: g.start, drift: 4, gone: Twins.caught, by: who))
+        }
+    }
+
+    /// In its sleep, now and then, a little one smiles at a dream, snores, or slumps over onto the
+    /// other. The other, if it's up and has a moment, smiles too, covers its ears, or holds it up.
+    private func stir(_ who: Int) {
+        let o = 1 - who, up = here[o] && free(o)
+        switch Int.random(in: 0..<(up ? 3 : 2)) {
+        case 0:
+            start(.dream, on: who, for: 3.4)
+            if up { start(.aww, on: o, for: 3.4) }
+        case 1:
+            start(.snore, on: who, for: 3.8)
+            if let g = gesture[who] {
+                let side: CGFloat = who == 0 ? -1 : 1, from = zFrom(who, side, size: 1.8)
+                wisps.append(Wisp(who: who, kind: .z, x: from.x, y: from.y, side: side, size: 1.8, start: g.start + 0.46 * g.length))
+            }
+            if up { start(.ears, on: o, for: 3.8) }
+        default:
+            start(.slump, on: who, for: 7); start(.prop, on: o, for: 7)
+        }
+    }
+
+    /// Where a z leaves a sleeper's head, on the side it drifts off to.
+    private func zFrom(_ who: Int, _ side: CGFloat, size: CGFloat = 1) -> NSPoint {
+        let t = twin[who]
+        return NSPoint(x: who == 2 ? place(2) + t.width * 0.4 : place(who) + side * (2.6 + 1.6 * size), y: t.top - Twins.doze * dozing(who) + 1.8)
+    }
+
+    /// Where a z drifting over from the sleeper beside it meets its inner paw: how far from where that paw rests.
+    private func zCatch(_ who: Int) -> (x: CGFloat, y: CGFloat) {
+        let way: CGFloat = who == 0 ? -1 : 1, from = zFrom(1 - who, way), u = Twins.caught
+        let x = from.x + way * 4 * u + sin(u * 2 * .pi) * 0.4, y = from.y + 5 * u     // (as the z goes: see paint)
+        return (x - (place(who) - way * twin[who].paw), y - 0.7)
+    }
+
+    /// A whistled tune: two notes float up and away.
+    private func tune(_ who: Int) {
+        guard let g = gesture[who], g.move == .whistle else { return }
+        let side: CGFloat = who == 0 ? -1 : 1, t = twin[who]
+        for (n, at) in [0.15, 0.6].enumerated() {
+            wisps.append(Wisp(who: who, kind: .note, x: place(who) + side * (t.width / 2 + 0.4), y: t.top - 1.4, side: side,
+                              size: 0.9 + 0.1 * CGFloat(n), start: g.start + at * g.length, drift: 2.2))
+        }
+    }
+
     /// Another hour of working together.
     func highFive() {
         if company { owed = .five; settleUp() }
@@ -611,14 +704,18 @@ final class Twins: NSView {
         } else if rested.contains(0), rested.contains(1), rarely(15) {
             duet()                                                                          // now and then, something just between the little ones
         } else if !company, rested == [mine], now > nextTrick, cellAt == CGFloat(mine), hop == nil, doing[mine] != .wait {
-            let next = tricks[trick % tricks.count]                                         // on its own, it plays with the braincell
-            start(next, on: mine, for: next == .juggle ? 3.2 : next == .seek ? 3.6 : 2.8)
+            let (next, length) = tricks[trick % tricks.count]                               // on its own, it plays with the braincell
+            start(next, on: mine, for: length)
             if next == .admire { twinkle = max(now, settled[mine]) + 1.1 * slow(mine) }
             nextTrick = now + long(.random(in: 100...260)); trick += 1
         } else if let who = rested.randomElement(), Double.random(in: 0..<1) < 1 / Double(max(2, up.count)) {    // three are no busier than two
             let sleepy = mood[who] == .weary ? rarely(3) : Calendar.current.component(.hour, from: Date()) < 5 && rarely(6)
-            if sleepy { yawn(who) }
-            else if doing[who] != .wait, rarely(6), let (fidget, length) = fidgets.randomElement() { start(fidget, on: who, for: length) }   // now and then, a fidget (not while it's asking)
+            if sleepy { if rarely(3) { start(.doze, on: who, for: 3.2) } else { yawn(who) } }
+            else if doing[who] != .wait, sleeper(beside: who) != nil, rarely(4) { tend(who) }                // something for the one asleep beside it
+            else if doing[who] != .wait, rarely(4), let (fidget, length) = fidgets(who).randomElement() {     // now and then, a fidget (not while it's asking)
+                start(fidget, on: who, for: length)
+                tune(who)
+            }
             else { start(.act(doing[who]), on: who, for: doing[who].beat) }
         }
         if let who = up.randomElement(), gesture[who] == nil, tweens["lid\(who)"] == nil { blink(who) }
@@ -652,16 +749,17 @@ final class Twins: NSView {
         if awake[who], tweens[lid] == nil, pose[lid]! != droop(who) { move(lid, to: droop(who), over: 0.6 * slow(who)) }
     }
 
-    /// A z drifts up from a sleeper (a big one after a long day, and bigger again from the big one).
-    /// A twin that's out of usage sweats instead.
+    /// A z drifts up from a sleeper (a big one after a long day, and bigger again from the big one), or
+    /// now and then a little one, sound asleep, stirs. A twin that's out of usage sweats instead.
     private func puff(_ who: Int) {
         guard here[who] else { return }
         if mood[who] == .spent {
             sweat(who)
+        } else if who < 2, gesture[who] == nil, Date().timeIntervalSince(slept[who]) > long(120), rarely(3) {
+            stir(who)
         } else {
-            let t = twin[who], side: CGFloat = who == 0 ? -1 : 1, size: CGFloat = (mood[who] == .weary ? 1.5 : 1) * (who == 2 ? 1.35 : 1)
-            let x = who == 2 ? place(2) + t.width * 0.4 : place(who) + side * (2.6 + 1.6 * size)
-            wisps.append(Wisp(who: who, sweat: false, x: x, y: t.top - Twins.doze * dozing(who) + 1.8, side: side, size: size, start: now))
+            let side: CGFloat = who == 0 ? -1 : 1, size: CGFloat = (mood[who] == .weary ? 1.5 : 1) * (who == 2 ? 1.35 : 1), from = zFrom(who, side, size: size)
+            wisps.append(Wisp(who: who, kind: .z, x: from.x, y: from.y, side: side, size: size, start: now))
         }
         let sound = !showOff && Date().timeIntervalSince(slept[who]) > 120       // sound asleep, it barely stirs
         nextWisp[who] = now + (sound ? .random(in: 60...150) : .random(in: 5...9)) * slow(who)
@@ -672,7 +770,7 @@ final class Twins: NSView {
 
     private func sweat(_ who: Int) {
         let side: CGFloat = who == 0 ? -1 : 1, t = twin[who]
-        wisps.append(Wisp(who: who, sweat: true, x: place(who) + side * (t.width / 2 + 1.5), y: t.top - pose["sink\(who)"]! * Twins.doze * dozing(who) - 0.3, side: side, size: t.scale, start: now))
+        wisps.append(Wisp(who: who, kind: .sweat, x: place(who) + side * (t.width / 2 + 1.5), y: t.top - pose["sink\(who)"]! * Twins.doze * dozing(who) - 0.3, side: side, size: t.scale, start: now))
         run()
     }
 
@@ -693,7 +791,12 @@ final class Twins: NSView {
     /// Eases a twin out of whatever it's doing, rather than snapping it back to rest.
     private func calm(_ who: Int) {
         queued[who] = nil
-        if gesture[who] != nil, gesture[who]!.cut == nil { gesture[who]!.cut = now }
+        guard let g = gesture[who], g.cut == nil else { return }
+        gesture[who]!.cut = now
+        wisps.removeAll { $0.who == who && $0.start > now }                         // a note, or a snore, still to come
+        for n in wisps.indices where wisps[n].by == who { wisps[n].gone = 1 }       // a z it was after gets away
+        let pairs: [[Move]] = [[.slump, .prop], [.prod, .jostled]]                  // one can't lean on the other alone, or flinch at nothing
+        if who < 2, let other = gesture[1 - who], pairs.contains(where: { $0.contains(g.move) && $0.contains(other.move) }) { calm(1 - who) }
     }
 
     private func easing(_ who: Int) -> Double { 0.25 * (who == 2 ? 1.6 : 1) }     // how long that takes
@@ -828,7 +931,8 @@ final class Twins: NSView {
             guard let g = gesture[who], now - g.start >= g.length || g.cut.map({ now - $0 >= easing(who) }) == true else { continue }
             switch g.move {
             case .act, .juggle, .header, .admire, .seek, .hum, .scratch, .hop, .sneeze, .whisper, .hear, .poke, .poked, .copycat,
-                 .pat, .patted, .stare, .blinks, .duck, .startle, .watch, .clap, .show, .ooh, .volley, .returnIt: acted[who] = now
+                 .pat, .patted, .stare, .blinks, .duck, .startle, .watch, .clap, .show, .ooh, .volley, .returnIt,
+                 .hiccup, .slowBlink, .peer, .doze, .whistle, .polish, .balance, .stroke, .prod, .catchZ, .aww, .ears, .prop: acted[who] = now
             default: break
             }
             gesture[who] = nil; ended = true
@@ -853,10 +957,14 @@ final class Twins: NSView {
         var squint: CGFloat = 0, smile: CGFloat = 0, mouth: CGFloat = 0, squash: CGFloat = 0
         var wide: CGFloat = 0, frown: CGFloat = 0, derp: CGFloat = 0, daze: CGFloat = 0
         var reach: (x: CGFloat, y: CGFloat) = (0, 0)    // how far its inner paw has gone toward the braincell...
-        var grip: CGFloat = 0                           // ...to lift it from below (0), or to hold its near side (1)
+        var grip: CGFloat = 0                           // ...to lift it from below (0), or to hold its near side (1; -1 for its own, from beside it)
+        var rub: (x: CGFloat, y: CGFloat) = (0, 0)      // ...and rub it there
         var pat: (x: CGFloat, y: CGFloat) = (0, 0)      // or over to the top of the other's head...
-        var tap: CGFloat = 0                            // ...and how far above it
+        var tap: CGFloat = 0                            // ...how far above it (or below it, down its side)...
+        var along: CGFloat = 0                          // ...and how far along it from the near side (back from there: out by its side)
         var toy: (x: CGFloat, y: CGFloat) = (0, 0)      // where its playing carries the braincell
+        var shine: CGFloat = 0                          // a glint on the braincell, once it's polished
+        var front: CGFloat = 0                          // 1 = it looks out at you, and not to the braincell
     }
 
     private func limbs(_ who: Int, at now: CFTimeInterval) -> Limbs {
@@ -1066,8 +1174,87 @@ final class Twins: NSView {
             l.smile = k((0.68, 0), (0.8, 1), (1, 0)); l.squint = 0.4 * k((0.68, 0), (0.8, 1), (1, 0)); l.head = -0.3 * k((0.7, 0), (0.82, 1), (1, 0))
         case .thanks:           // a little nod to whoever passed it
             l.head = -0.45 * bell; l.gazeX = 0.8 * toward * ease; l.smile = 0.7 * ease
+        case .hiccup:           // hiccups, three times, with a jolt and wide eyes each time; then a sheepish smile
+            let hic = [0.2, 0.47, 0.72].map { pow(max(0, 1 - abs(p - $0) / 0.045), 2) }.reduce(0, +) * fade
+            let wary = k((0.2, 0), (0.27, 1), (0.76, 1), (0.84, 0)), sheepish = k((0.78, 0), (0.86, 1), (0.95, 1), (1, 0))
+            l.head = 0.75 * hic; l.wide = 0.65 * hic + 0.25 * wary; l.gazeY = 0.2 * wary - 0.3 * sheepish
+            l.smile = sheepish; l.gazeX = -0.5 * toward * sheepish; l.tilt = 3 * toward * sheepish
+        case .slowBlink:        // looks out at you, and gives you a slow blink
+            let look = k((0, 0), (0.18, 1), (0.84, 1), (1, 0))
+            l.front = look; l.gazeY = -0.3 * look; l.head = 0.25 * look
+            l.squint = k((0.34, 0), (0.47, 1), (0.58, 1), (0.74, 0)); l.smile = 0.75 * k((0.3, 0), (0.46, 1), (0.84, 1), (1, 0))
+        case .peer:             // peers down over the ledge at your screen, curious, and comes back up
+            let down = k((0.04, 0), (0.2, 1), (0.74, 1), (0.9, 0))
+            l.front = down; l.gazeY = -0.95 * down; l.head = -0.7 * down; l.squint = 0.25 * down
+            l.gazeX = 0.4 * k((0.2, 0), (0.36, -1), (0.56, 1), (0.72, 0)); l.tilt = -3 * toward * k((0.24, 0), (0.4, 1), (0.66, 1), (0.8, 0))
+        case .doze:             // nods off, and catches itself with a start; blinks, and shakes it off
+            l.head = k((0.04, 0), (0.44, -1.4), (0.5, 0.5), (0.6, 0))
+            l.squint = k((0.02, 0), (0.4, 0.95), (0.46, 0.95), (0.5, 0)) + k((0.64, 0), (0.67, 1), (0.7, 0)) + k((0.75, 0), (0.78, 1), (0.81, 0))
+            l.wide = 0.7 * k((0.46, 0), (0.5, 1), (0.62, 0.4), (0.7, 0))
+            l.tilt = -4 * toward * k((0.1, 0), (0.44, 1), (0.5, 0)) + 2.5 * sin(.pi * 4 * max(0, min(1, (p - 0.84) / 0.12))) * fade
+        case .whistle:          // looks off into the distance and whistles a little tune, swaying to it
+            l.gazeX = -0.5 * toward * ease; l.gazeY = 0.45 * ease; l.mouth = (0.38 + 0.06 * wave(3)) * ease
+            l.tilt = 3 * wave(1.5) * ease; l.lean = 0.3 * wave(1.5) * ease; l.squint = 0.15 * ease
+        case .polish:           // rubs its braincell with a paw, up and down, till it gleams
+            let hold = k((0.06, 0), (0.2, 1), (0.74, 1), (0.88, 0)), rubbing = k((0.18, 0), (0.24, 1), (0.62, 1), (0.68, 0))
+            let turn = 2 * .pi * 3 * (p - 0.18) / 0.5
+            l.reach = (hold, hold); l.grip = -1; l.rub = (0.3 * cos(turn) * rubbing, 0.85 * sin(turn) * rubbing)
+            l.toy = (0.25 * l.rub.x, 0.25 * l.rub.y)     // it jiggles a little under the paw
+            l.shine = pow(sin(.pi * max(0, min(1, (p - 0.68) / 0.22))), 2) * fade
+            l.gazeX = 0.35 * toward * ease; l.gazeY = 0.6 * ease; l.squint = 0.2 * rubbing; l.smile = k((0.68, 0), (0.78, 1), (0.92, 1), (1, 0))
+        case .balance:          // its braincell starts to roll off: it gets under it, this way and that, till it's steady
+            let roll = k((0.06, 0), (0.2, 1.5), (0.34, -1.25), (0.47, 0.85), (0.58, -0.4), (0.68, 0)) * toward
+            let under = k((0.1, 0), (0.24, 1.5), (0.38, -1.25), (0.51, 0.85), (0.62, -0.4), (0.72, 0)) * toward
+            l.toy = (roll, -0.3 * abs(roll)); l.lean = 0.65 * under; l.tilt = 5 * (roll - 0.65 * under)
+            l.gazeX = 0.4 * roll; l.gazeY = 0.75 * ease; l.squint = 0.15 * k((0.06, 0), (0.16, 1), (0.66, 1), (0.74, 0))
+            l.smile = k((0.68, 0), (0.78, 1), (0.92, 1), (1, 0)); l.head = 0.3 * k((0.7, 0), (0.78, 1), (0.86, 0))
+        case .stroke:           // reaches over and strokes the sleeper's head, softly, twice
+            l.pat = (k((0.04, 0), (0.2, 1), (0.8, 1), (0.94, 0)), k((0, 0), (0.15, 1), (0.85, 1), (0.98, 0)))
+            l.along = key(Double(p), [(0.22, 0), (0.42, 2.6), (0.48, 2.6), (0.56, 0.3), (0.74, 2.6), (0.82, 2.6)])
+            l.tap = key(Double(p), [(0, 1.2), (0.22, 0), (0.44, 0), (0.5, 1.0), (0.54, 1.0), (0.58, 0), (0.76, 0), (0.86, 1.4)])
+            l.gazeX = 0.8 * toward * ease; l.gazeY = -0.35 * ease; l.lean = 0.5 * toward * ease; l.tilt = -3 * toward * ease; l.smile = 0.8 * ease
+        case .dream:            // smiles in its sleep, and nestles into it
+            let warm = k((0.25, 0), (0.4, 1), (0.84, 1), (1, 0))
+            l.smile = warm; l.head = 0.3 * warm; l.tilt = -2.5 * toward * warm
+        case .aww:              // looks over at the sleeper smiling in its sleep, and smiles too
+            l.gazeX = 0.85 * toward * ease; l.gazeY = -0.35 * ease; l.tilt = -3 * toward * ease; l.head = 0.2 * ease
+            l.smile = k((0.3, 0), (0.45, 1), (0.85, 1), (1, 0))
+        case .prod:             // prods the sleeper in the side, twice: it sleeps on. A shrug
+            let there = k((0.04, 0), (0.2, 1), (0.56, 1), (0.68, 0)), shrug = k((0.72, 0), (0.8, 1), (0.9, 1), (0.98, 0))
+            let jab = [0.3, 0.45].map { pow(max(0, 1 - abs(p - $0) / 0.06), 2) }.reduce(0, +)
+            l.pat = (there, k((0, 0), (0.16, 1), (0.6, 1), (0.72, 0))); l.along = 0.2 - twin[1 - who].width / 2 + 1.2 * jab; l.tap = -4.1
+            l.gazeX = 0.85 * toward * k((0, 0), (0.12, 1), (0.66, 1), (0.74, 0))
+            l.gazeY = -0.4 * k((0, 0), (0.12, 1), (0.5, 1), (0.58, 0)) + 0.3 * k((0.56, 0), (0.62, 1), (0.68, 1), (0.74, 0))
+            l.lean = 0.5 * toward * there; l.front = shrug; l.pawY = (1.1 * shrug, 1.1 * shrug); l.head = -0.4 * shrug; l.smile = 0.6 * shrug
+        case .jostled:          // ...it gives a little with each prod, and sleeps on
+            let jab = [0.31, 0.46].map { pow(max(0, 1 - abs(p - $0) / 0.07), 2) }.reduce(0, +) * fade
+            l.lean = -0.7 * toward * jab; l.tilt = 3.5 * toward * jab
+        case .catchZ:           // watches one of the sleeper's z's drift its way, snaps it up in a paw, and peeks in: gone
+            let at = zCatch(who), rise = k((0.22, 0), (0.42, 1), (0.5, 1), (0.62, 0)), look = k((0.48, 0), (0.6, 1), (0.74, 1), (0.86, 0))
+            let watch = k((0.02, 0), (0.12, 1), (0.42, 1), (0.48, 0)), after = k((0.76, 0), (0.86, 1), (0.95, 1), (1, 0))
+            l.pawX = inner(at.x * rise - 1.0 * toward * look); l.pawY = inner(at.y * rise + 3.4 * look + 0.5 * k((0.4, 0), (0.43, 1), (0.47, 0)))
+            l.gazeX = 0.85 * toward * watch + 0.5 * toward * look; l.gazeY = 0.5 * watch - 0.35 * look
+            l.wide = 0.5 * k((0.5, 0), (0.6, 1), (0.72, 1), (0.8, 0)); l.front = after; l.smile = after; l.tilt = 3 * toward * after
+        case .snore:            // a long breath in, and a snore that shakes it
+            l.head = 0.9 * k((0.05, 0), (0.38, 1), (0.44, 1), (0.52, -0.2), (0.66, 0)); l.squash = 0.4 * k((0.43, 0), (0.47, 1), (0.6, 0))
+        case .ears:             // sees the snore coming, and covers its ears till it's over; then a look
+            let cover = k((0.2, 0), (0.34, 1), (0.6, 1), (0.72, 0)), look = k((0.66, 0), (0.74, 1), (0.88, 1), (0.96, 0))
+            l.pawY = (4.8 * cover, 4.8 * cover); l.pawX = (2.1 * cover, -2.1 * cover)
+            l.squint = 0.55 * cover + 0.35 * look; l.head = -0.3 * cover + 0.35 * k((0.43, 0), (0.47, 1), (0.55, 0))
+            l.gazeX = 0.85 * toward * (k((0.06, 0), (0.16, 1), (0.3, 1), (0.38, 0)) + look); l.gazeY = -0.3 * look; l.frown = 0.35 * look
+        case .slump:            // in its sleep, it slumps over onto the other, rests there a while, and slides back
+            let over = k((0.04, 0), (0.3, 1), (0.76, 1), (0.96, 0))
+            l.lean = 2.1 * toward * over; l.tilt = -12 * toward * over; l.head = 0.5 * over; l.smile = 0.5 * k((0.3, 0), (0.4, 1), (0.76, 1), (0.86, 0))
+        case .prop:             // ...the other looks down at it, and lets it, leaning in to hold it up
+            let hold = k((0.16, 0), (0.32, 1), (0.76, 1), (0.94, 0)), soft = k((0.26, 0), (0.38, 1), (0.84, 1), (1, 0))
+            l.lean = 1.3 * toward * hold; l.tilt = -4 * toward * hold
+            l.gazeX = 0.8 * toward * k((0.1, 0), (0.18, 1), (0.8, 1), (0.92, 0)); l.gazeY = -0.4 * k((0.1, 0), (0.18, 1), (0.8, 1), (0.92, 0))
+            l.wide = 0.4 * k((0.1, 0), (0.16, 1), (0.26, 0)); l.smile = soft; l.squint = 0.3 * soft
         case .nod, .squabble:
             break
+        }
+        if [.slump, .prop].contains(g.move), cellAt == CGFloat(who), hop == nil {      // a braincell over its head goes with it
+            l.toy = (l.lean - (twin[who].top + 3.1) * sin(l.tilt * .pi / 180), 0)
         }
         return l
     }
@@ -1084,6 +1271,7 @@ final class Twins: NSView {
         let aim: CGFloat = g.aim == 0 ? -1 : g.aim == 1 ? 1 : 0                 // toward the little one it's turned to
         let side: CGFloat = here[1] && !here[0] ? -1 : 1                        // the side with room to lean out on
         func wave(_ cycles: CGFloat) -> CGFloat { sin(p * cycles * 2 * .pi) }
+        func k(_ frames: (Double, CGFloat)...) -> CGFloat { key(Double(p), frames) * fade }
         switch g.move {
         case .act(.think):      // stares into the middle distance, brow furrowed, chin down a little
             l.frown = 0.3 + 0.55 * ease; l.squint = 0.3 * ease; l.gazeY = 0.3 * ease; l.gazeX = -0.3 * ease; l.head = -0.35 * ease
@@ -1147,9 +1335,23 @@ final class Twins: NSView {
             let build = smooth(p / 0.6) * (1 - smooth((p - 0.61) / 0.06)), snap = pow(max(0, 1 - abs(p - 0.68) / 0.07), 1.5)
             l.head = (0.6 * build - 0.9 * snap) * fade; l.gazeY = 0.5 * build * fade; l.squint = (0.7 * build + snap) * fade
             l.mouth = 0.6 * build * fade; l.squash = 0.6 * snap * fade; l.frown = 0.3 * smooth((p - 0.72) / 0.1) * fade
+        case .hiccup:           // one big hiccup, which it doesn't find funny
+            let hic = pow(max(0, 1 - abs(p - 0.42) / 0.05), 2) * fade, after = k((0.48, 0), (0.58, 1), (0.88, 1), (1, 0))
+            l.head = 0.7 * hic; l.wide = 0.5 * hic; l.frown += 0.45 * after; l.squint = 0.25 * after
+        case .slowBlink:        // looks out at you, and gives you one slow, solemn blink
+            let look = k((0, 0), (0.18, 1), (0.84, 1), (1, 0))
+            l.front = look; l.gazeY = -0.3 * look; l.squint = k((0.36, 0), (0.5, 1), (0.6, 1), (0.76, 0)); l.smile = 0.3 * k((0.6, 0), (0.72, 1), (0.88, 1), (1, 0))
+        case .peer:             // looks down at your screen, over the little ones, and frowns at what it sees
+            let down = k((0.04, 0), (0.2, 1), (0.76, 1), (0.92, 0))
+            l.front = down; l.gazeY = -0.9 * down; l.head = -0.4 * down; l.frown += 0.5 * k((0.3, 0), (0.42, 1), (0.76, 1), (0.9, 0)); l.squint = 0.3 * down
+        case .doze:             // nods off, catches itself, and looks as if it never did
+            l.head = k((0.04, 0), (0.46, -1.1), (0.52, 0.35), (0.62, 0))
+            l.squint = k((0.02, 0), (0.42, 0.9), (0.48, 0.9), (0.52, 0)); l.wide = 0.4 * k((0.48, 0), (0.52, 1), (0.64, 0))
+            l.frown += 0.4 * k((0.55, 0), (0.65, 1), (0.9, 1), (1, 0))
         case .bump, .five, .hug, .juggle, .squabble, .whisper, .hear, .poke, .poked, .copycat, .glance, .pat, .patted, .stare, .blinks, .duck, .startle,
-             .watch, .clap, .show, .ooh, .volley, .returnIt, .tip, .blow, .offer, .take, .nudge, .beckon, .fumble, .thanks:
-            break       // just between the little ones
+             .watch, .clap, .show, .ooh, .volley, .returnIt, .tip, .blow, .offer, .take, .nudge, .beckon, .fumble, .thanks,
+             .whistle, .polish, .balance, .stroke, .prod, .catchZ, .aww, .ears, .prop, .dream, .jostled, .snore, .slump:
+            break       // just the little ones
         }
         return l
     }
@@ -1425,17 +1627,17 @@ final class Twins: NSView {
             head.close()
 
             // Eyes drift toward the braincell: the holder glances up, the others look across at it, or up, if it's on the big one.
-            let ko = max(pose["ko\(i)"]!, l.daze)
+            let ko = max(pose["ko\(i)"]!, l.daze), aside = watching * (1 - l.front)
             var gazeX: CGFloat, gazeY: CGFloat
             if big {
                 let dx = cellSpot.midX - cx, dy = cellSpot.midY - (t.eyeY + down), d = max(1, hypot(dx, dy))
-                gazeX = max(-1.7, min(1.7, (0.9 * dx / d * watching + l.gazeX) * es))
-                gazeY = (0.55 * dy / d * watching + l.gazeY + 0.25 * l.smile) * es
+                gazeX = max(-1.7, min(1.7, (0.9 * dx / d * aside + l.gazeX) * es))
+                gazeY = (0.55 * dy / d * aside + l.gazeY + 0.25 * l.smile) * es
             } else {
                 let holds = i == 0 ? 1 - lane : lane, reach: CGFloat = hollow ? 0.55 : 1.2, inward: CGFloat = i == 0 ? 1 : -1
                 let across = 0.55 * inward * (1 - holds), lift = 0.35 * holds * (1 - perch) - 0.45 * perch
-                gazeX = max(-reach, min(reach, (across + (0.45 * inward - across) * lofty) * watching + l.gazeX))
-                gazeY = (lift + (0.55 - lift) * lofty) * watching + l.gazeY + 0.25 * l.smile
+                gazeX = max(-reach, min(reach, (across + (0.45 * inward - across) * lofty) * aside + l.gazeX))
+                gazeY = (lift + (0.55 - lift) * lofty) * aside + l.gazeY + 0.25 * l.smile
             }
             let open = 1.2 * (1 - 0.75 * pose["lid\(i)"]!) * (1 - 0.75 * min(1, l.squint)) * (1 - ko)
             let face = NSBezierPath(), crosses = NSBezierPath()
@@ -1484,10 +1686,11 @@ final class Twins: NSView {
             for (n, side) in [CGFloat(-1), 1].enumerated() {
                 var x = ox + at[i] + side * t.paw + (n == 0 ? l.pawX.0 : l.pawX.1) * s, y = lift + 0.7 * s + (n == 0 ? l.pawY.0 : l.pawY.1) * s
                 if n == inner {     // from below, or by its near side
-                    let hold = NSPoint(x: cellSpot.midX + (n == 1 ? -1 : 1) * l.grip * (cellSpot.width / 2 + 0.3 * s), y: cellSpot.midY - 2.6 * s + 2.3 * s * l.grip)
-                    x += (hold.x - x) * l.reach.x; y += (hold.y - y) * l.reach.y
+                    let hold = NSPoint(x: cellSpot.midX + (n == 1 ? -1 : 1) * l.grip * (cellSpot.width / 2 + 0.3 * s), y: cellSpot.midY - 2.6 * s + 2.3 * s * abs(l.grip))
+                    x += (hold.x - x) * l.reach.x + l.rub.x * s; y += (hold.y - y) * l.reach.y + l.rub.y * s
                     if i < 2, l.pat.y > 0 {     // or onto the near side of the other's head, with a thin gap around it so it stands out there
-                        let o = 1 - i, top = NSPoint(x: ox + at[o] + limb[o].lean + (o == 0 ? 0.8 : -0.8), y: twin[o].top + drop(o) + 1.1 + l.tap)
+                        let o = 1 - i, away: CGFloat = o == 0 ? -1 : 1
+                        let top = NSPoint(x: ox + at[o] + limb[o].lean - 0.8 * away + away * l.along, y: twin[o].top + drop(o) + 1.1 + l.tap - 0.12 * max(0, l.along) * l.along)
                         x += (top.x - x) * l.pat.x; y += (top.y - y) * l.pat.y
                         clear([NSBezierPath(ovalIn: oval(x, y, 2.1, 1.85))])
                     }
@@ -1529,24 +1732,38 @@ final class Twins: NSView {
                 star(cellSpot.midX + at.0, cellSpot.midY + at.1, 1.6 * pow(sin(.pi * max(0, min(1, (glint - 0.2 * CGFloat(n)) / 0.6))), 2))
             }
         }
+        if let shine = limb.map(\.shine).max(), shine > 0 { star(cellSpot.midX + 1.9, cellSpot.midY + 1.9, 1.7 * shine) }     // freshly polished
 
-        for w in wisps {        // they fade as they go, and with their twin if it ducks away
+        for w in wisps {        // they fade as they go, and with their twin if it ducks away; a caught one is gone at once
             let p = CGFloat((now - w.start) / 2.4)
-            guard p > 0, p < 1 else { continue }
-            let shade = ink.withAlphaComponent(ink.alphaComponent * min(1, p * 4) * (1 - p) * max(0, min(1, pose["up\(w.who)"]!))), path = NSBezierPath()
-            if w.sweat {        // a bead of sweat runs down beside the head
+            guard p > 0, p < 1, p < w.gone + 0.04 else { continue }
+            let fade = min(1, p * 4) * (1 - p) * max(0, min(1, pose["up\(w.who)"]!)) * min(1, (w.gone + 0.04 - p) / 0.04)
+            let shade = ink.withAlphaComponent(ink.alphaComponent * fade), path = NSBezierPath()
+            switch w.kind {
+            case .sweat:        // a bead of sweat runs down beside the head
                 let x = ox + w.x, y = w.y - 3 * p * w.size, z = w.size
                 path.move(to: NSPoint(x: x, y: y + 1.4 * z))
                 path.curve(to: NSPoint(x: x, y: y - 0.9 * z), controlPoint1: NSPoint(x: x + 1.2 * z, y: y - 0.1 * z), controlPoint2: NSPoint(x: x + 0.9 * z, y: y - 0.9 * z))
                 path.curve(to: NSPoint(x: x, y: y + 1.4 * z), controlPoint1: NSPoint(x: x - 0.9 * z, y: y - 0.9 * z), controlPoint2: NSPoint(x: x - 1.2 * z, y: y - 0.1 * z))
                 shade.setFill(); path.fill()
-            } else {            // a z drifts up and away
+            case .z:            // a z drifts up and away
                 let half = (1.0 + 0.6 * p) * w.size
-                let x = ox + w.x + w.side * 1.4 * p + sin(p * 2 * .pi) * 0.4, y = w.y + 5 * p
+                let x = ox + w.x + w.side * w.drift * p + sin(p * 2 * .pi) * 0.4, y = w.y + 5 * p
                 path.move(to: NSPoint(x: x - half, y: y + half)); path.line(to: NSPoint(x: x + half, y: y + half))
                 path.line(to: NSPoint(x: x - half, y: y - half)); path.line(to: NSPoint(x: x + half, y: y - half))
                 path.lineWidth = w.who == 2 ? 0.85 : 0.7; path.lineCapStyle = .round; path.lineJoinStyle = .round
                 shade.setStroke(); path.stroke()
+            case .note:         // a note floats up, rocking a little
+                let x = ox + w.x + w.side * w.drift * p + sin(p * 2 * .pi) * 0.5, y = w.y + 4.6 * p, z = w.size
+                let dot = NSBezierPath(ovalIn: NSRect(x: -0.78 * z, y: -0.58 * z, width: 1.56 * z, height: 1.16 * z))
+                dot.transform(using: AffineTransform(rotationByDegrees: 22))
+                path.move(to: NSPoint(x: 0.66 * z, y: 0.1 * z)); path.line(to: NSPoint(x: 0.66 * z, y: 2.8 * z))
+                path.curve(to: NSPoint(x: 1.6 * z, y: 1.5 * z), controlPoint1: NSPoint(x: 0.9 * z, y: 2.3 * z), controlPoint2: NSPoint(x: 1.7 * z, y: 2.2 * z))
+                var put = AffineTransform(translationByX: x, byY: y)
+                put.rotate(byDegrees: 8 * sin(p * 3 * .pi))
+                dot.transform(using: put); path.transform(using: put)
+                path.lineWidth = 0.55; path.lineCapStyle = .round
+                shade.setFill(); dot.fill(); shade.setStroke(); path.stroke()
             }
         }
     }

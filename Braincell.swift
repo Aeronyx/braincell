@@ -312,7 +312,7 @@ final class Twins: NSView {
     private var wisps: [Wisp] = []
     private var nextWisp: [CFTimeInterval] = [0, 0, 0]
 
-    private var frames: Timer?, drift = 0
+    private var frames: Timer?, drift = 0, drawn: [CGFloat] = []      // drawn: the last frame drawn, as numbers (see sight)
     private var life: Timer?
     weak var button: NSView?    // the status item's button knows whether the menu bar is light or dark
     var edge: CGFloat? { didSet { if edge != oldValue { needsDisplay = true } } }      // where the menu bar slot ends, on the right
@@ -402,11 +402,17 @@ final class Twins: NSView {
         if !parts.isEmpty, !company { owed = nil; trick = tricks.firstIndex { $0.0 == .seek }! }  // (on its own, the first thing it does is look for them)
         if !parts.isEmpty { after(0.6) { [weak self] in self?.placeCell() } }                  // a braincell left over someone who's gone settles elsewhere
         if want[0], want[1] { let ready = max(settled[0], settled[1]); settled[0] = ready; settled[1] = ready }    // so they can greet each other as one
-        if pose["alone"]! != lone {
-            move("alone", to: lone, over: (awake[mine] ? 0.8 : 1.1) * (mine == 2 ? 1.3 : 1), delay: company ? 0.1 : 0.9) { [weak self] in
-                guard let self else { return }
-                if lone == 1 { self.onWidth?(self.soloWidth) }
-                self.placeCell()
+        // Mine goes by where it's headed, not where it is: a friend who leaves can be back (or one who joins,
+        // gone) before it has set off, and then it stays put.
+        if (tweens["alone"]?.to ?? pose["alone"]!) != lone {
+            if pose["alone"]! == lone {
+                tweens["alone"] = nil
+            } else {
+                move("alone", to: lone, over: (awake[mine] ? 0.8 : 1.1) * (mine == 2 ? 1.3 : 1), delay: company ? 0.1 : 0.9) { [weak self] in
+                    guard let self else { return }
+                    if lone == 1, !self.company { self.onWidth?(self.soloWidth) }
+                    self.placeCell()
+                }
             }
         }
         if fresh {
@@ -964,7 +970,7 @@ final class Twins: NSView {
         var grabbed = false
         func grab(_ who: Int) {
             let length = 1.7 * slow(who)
-            gesture[who] = Gesture(move: .grab, start: now, length: length, cut: nil)
+            gesture[who] = Gesture(move: .grab, start: now, length: length, cut: nil, aim: who == 2 ? (cellAt == 0 ? 0 : 1) : -1)     // (the big one: the side it reaches over to)
             next.start = now + 0.36 * length; next.length = 0.34 * length; next.height = 1.0; grabbed = true
         }
         if let toss {                                                                                    // flicked over on the way to sleep
@@ -1073,7 +1079,25 @@ final class Twins: NSView {
         let gentle = gesture[0] == nil && gesture[1] == nil && hop == nil && now - twinkle > 1.4
             && tweens.keys.allSatisfy { $0.hasPrefix("lid") || $0 == "sink2" || $0 == "ko2" }
         drift += 1
-        if still ? wisps.isEmpty || drift % 3 == 0 : !gentle || drift % 2 == 0 { needsDisplay = true }
+        var due = still ? wisps.isEmpty || drift % 3 == 0 : !gentle || drift % 2 == 0
+        if due, !still, hop == nil, scene == nil, wisps.isEmpty, now - twinkle > 1.4 {     // (a pose held still: no need to draw it again)
+            let shows = sight(at: now)
+            if shows == drawn { due = false } else { drawn = shows }
+        } else if due {
+            drawn = []
+        }
+        if due { needsDisplay = true }
+    }
+
+    /// Everything a frame shows, as numbers, so one that would look just like the last needn't be drawn.
+    private func sight(at now: CFTimeInterval) -> [CGFloat] {
+        var all = pose.sorted { $0.key < $1.key }.map(\.value) + [cellAt]
+        for i in 0..<3 {
+            let l = limbs(i, at: now)
+            all += [l.gazeX, l.gazeY, l.head, l.tilt, l.lean, l.pawX.0, l.pawX.1, l.pawY.0, l.pawY.1, l.squint, l.smile, l.mouth, l.squash, l.wide, l.frown,
+                    l.derp, l.daze, l.reach.x, l.reach.y, l.grip, l.rub.x, l.rub.y, l.pat.x, l.pat.y, l.tap, l.along, l.toy.x, l.toy.y, l.shine, l.front, l.wink]
+        }
+        return all
     }
 
     // MARK: Gestures
@@ -1948,7 +1972,8 @@ final class Twins: NSView {
         func clear(_ paths: [NSBezierPath]) { cg.setBlendMode(.clear); paths.forEach { $0.fill() }; cg.setBlendMode(.normal) }
         func paws(_ i: Int) {   // the ledge cuts the paws into flat-bottomed mitts
             let t = twin[i], s = t.scale, l = limb[i], lift = (pose["paws\(i)"]! - 1) * 4 * s
-            let inner = i == 0 ? 1 : i == 1 ? 0 : cellSpot.midX < ox + at[2] ? 0 : 1      // the paw that can go and fetch the braincell
+            let taking = gesture[2].flatMap { $0.move == .grab && $0.aim >= 0 ? $0.aim : nil }                    // (the big one taking it keeps to that side, even once it's overhead)
+            let inner = i == 0 ? 1 : i == 1 ? 0 : taking ?? (cellSpot.midX < ox + at[2] ? 0 : 1)      // the paw that can go and fetch the braincell
             for (n, side) in [CGFloat(-1), 1].enumerated() {
                 var x = ox + at[i] + side * t.paw + (n == 0 ? l.pawX.0 : l.pawX.1) * s, y = lift + 0.7 * s + (n == 0 ? l.pawY.0 : l.pawY.1) * s
                 if n == inner {     // from below, or by its near side
